@@ -60,13 +60,26 @@ with col_b:
         "Doc B — downstream (e.g., 90% revision)", type="pdf", key="b"
     )
 
-threshold = st.slider(
-    "Suppression threshold (flags below this confidence are hidden)",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.6,
-    step=0.05,
-)
+col_t, col_m = st.columns([3, 2])
+with col_t:
+    threshold = st.slider(
+        "Suppression threshold (flags below this confidence are hidden)",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.6,
+        step=0.05,
+    )
+with col_m:
+    cross_doc_mode = st.checkbox(
+        "Cross-document mode",
+        value=False,
+        help=(
+            "Enable when the two PDFs are different document types (e.g., "
+            "equipment spec ↔ coordination study). Allows parameters to align "
+            "across pages and uses the canonical-name glossary. Leave OFF for "
+            "revision-diff comparisons where layout is shared."
+        ),
+    )
 
 if "decisions" not in st.session_state:
     st.session_state["decisions"] = {}  # flag_id -> {"verdict": "accepted"|"dismissed", ...}
@@ -91,7 +104,10 @@ if run:
         try:
             with st.spinner("Reviewing... extracting parameters and aligning across documents."):
                 flags = review_two_documents(
-                    str(a_path), str(b_path), embed_fn=embed_voyage
+                    str(a_path),
+                    str(b_path),
+                    embed_fn=embed_voyage,
+                    same_page_only=not cross_doc_mode,
                 )
         except Exception as e:
             st.error(f"Review failed: {e}")

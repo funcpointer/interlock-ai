@@ -15,6 +15,7 @@ dependencies = [
   "pyyaml>=6.0",
   "rapidfuzz>=3.9",
   "python-dotenv>=1.0",
+  "diskcache>=5.6",
 ]
 
 [dependency-groups]

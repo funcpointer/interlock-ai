@@ -1,0 +1,50 @@
+{
+  "surface_threshold": 0.6,
+  "n_flags_total": 4,
+  "n_flags_above_threshold": 4,
+  "tp_total": 3,
+  "tp_hit": 3,
+  "fp_traps_total": 2,
+  "fp_hits": 0,
+  "fn_total": 1,
+  "recall_tp": 1.0,
+  "fp_rate_traps": 0.0,
+  "per_id": {
+    "TP-1": {
+      "expected": "surfaced",
+      "category": "parameter_mismatch",
+      "matched_flags": 1,
+      "result": "TP"
+    },
+    "TP-2": {
+      "expected": "surfaced",
+      "category": "parameter_mismatch",
+      "matched_flags": 1,
+      "result": "TP"
+    },
+    "TP-3": {
+      "expected": "surfaced",
+      "category": "parameter_mismatch",
+      "matched_flags": 2,
+      "result": "TP"
+    },
+    "FP-1": {
+      "expected": "suppressed",
+      "category": "unit_normalization",
+      "matched_flags": 0,
+      "result": "TN"
+    },
+    "FP-2": {
+      "expected": "suppressed",
+      "category": "heading_only",
+      "matched_flags": 0,
+      "result": "TN"
+    },
+    "FN-1": {
+      "expected": "surfaced",
+      "category": "checklist_gap",
+      "matched_flags": 0,
+      "result": "FN"
+    }
+  }
+}

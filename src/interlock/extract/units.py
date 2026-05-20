@@ -30,6 +30,9 @@ def normalize_quantity(text: str) -> Any:
 
 
 def equivalent(a: str, b: str, rel_tol: float = 1e-3) -> bool:
+    # Short-circuit: case-insensitive string equality (handles part numbers like KRP-C-1600SP).
+    if a.strip().casefold() == b.strip().casefold():
+        return True
     try:
         qa = normalize_quantity(a)
         qb = normalize_quantity(b)

@@ -42,3 +42,10 @@ def test_equivalent_handles_garbage_safely() -> None:
 
 def test_dimensionality_mismatch_is_not_equivalent() -> None:
     assert not equivalent("132 kV", "132 kA")
+
+
+def test_string_equality_short_circuit_for_part_numbers() -> None:
+    # Non-numeric tokens like fuse part numbers must compare as strings, not via Pint.
+    assert equivalent("KRP-C-1600SP", "KRP-C-1600SP")
+    assert equivalent("LPN-RK-500SP", "lpn-rk-500sp")
+    assert not equivalent("KRP-C-1600SP", "KRP-C-1601SP")

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.un~
+*.un~
+.claude/
+eval/results/*.json
+!eval/results/.gitkeep
+.DS_Store
+*.egg-info/
+build/
+dist/
+fixtures/pdfs/_*.pdf

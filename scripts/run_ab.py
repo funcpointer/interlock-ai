@@ -28,13 +28,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from interlock.align.combiner import combine_alignments
-from interlock.align.embed import embed_voyage
-from interlock.align.exact import align_exact
-from interlock.align.semantic import align_semantic
-from interlock.detect.mismatch import detect_flags
-from interlock.extract.parameters import extract_parameters
-from interlock.ingest.pdf import ingest
+from interlock.align.combiner import combine_alignments  # noqa: E402
+from interlock.align.embed import embed_voyage  # noqa: E402
+from interlock.align.exact import align_exact  # noqa: E402
+from interlock.align.semantic import align_semantic  # noqa: E402
+from interlock.detect.mismatch import detect_flags  # noqa: E402
+from interlock.extract.parameters import extract_parameters  # noqa: E402
+from interlock.ingest.pdf import ingest  # noqa: E402
 
 OUT = Path("eval/results/ab_comparison.json")
 THRESHOLD = 0.5  # surfacing threshold (matches gold sets)

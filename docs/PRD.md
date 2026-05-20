@@ -1,64 +1,66 @@
 # InterLock AI — PRD
 
-## 1. Reviewer user
+*Version: v1.5-mvp-ready · Companion docs: `TDD.md`, `ARCHITECTURE.md`, `AUTHORSHIP.md`*
 
-A senior electrical engineer or discipline lead at an AES-type owner organization (or an EPC reviewer) accountable for cross-checking an engineering submittal at a 30/60/90 design-review milestone. Technically sophisticated, time-constrained, regulated context. Currently downloads PDFs from SharePoint, opens them side by side, manually checks for inconsistent parameters, annotates discrepancies in PDF comments, uploads back. The bottleneck is **their** time — they are the only ones who can judge whether a cross-document mismatch is real, but most of their review hour is spent **finding** mismatches, not adjudicating them.
+## Problem
 
-InterLock targets the finding step. Adjudication stays human.
+Engineering reviewers at energy-infrastructure owner-operators (AES-class utilities, EPC contractors) lose hours every day diff-reading PDFs to catch cross-document parameter mismatches — the kind that turn into multi-million-dollar field errors when a misplaced decimal on a transformer impedance escapes review. The bottleneck is not reading speed; it is the human ability to hold dozens of cross-references in working memory.
 
-## 2. Why this fits the existing workflow
+## Reviewer user
 
-InterLock is a **pre-review layer** on top of SharePoint/DMS, not a replacement. Three workflow facts that keep adoption low-friction:
+A senior electrical engineer or discipline lead reviewing a coordination study or equipment-spec submittal at a 30 / 60 / 90 design-review milestone. Technical, time-constrained, regulated context. **They do not want grammar or formatting fixes.** They want potential monetary-loss-grade discrepancies surfaced with one-click verifiable citations.
 
-- **No behavior change in upload.** Engineers continue uploading to SharePoint. InterLock pulls (or accepts uploads of) the same files.
-- **Pre-marked PDFs are respected.** Annotated and highlighted PDFs round-trip without losing the annotation layer.
-- **Flagging is suggestive, not assertive.** Every finding reads "potential mismatch, review" — never "this is wrong." Confidence-scored, dismissible, exportable. Engineers retain authority.
+## Why this fits the workflow
 
-A typical reviewer session: open InterLock, drop two PDFs, run review (~30–90 s), triage flag list (typical case: ≤ 10 high-confidence candidates), click through to bbox-highlighted source for any flag of interest, accept or dismiss, export the accepted-flag JSON for audit. Total minutes saved per review: roughly the time the reviewer was spending diff-reading by hand.
+InterLock is a **pre-review layer** on top of existing DMS (SharePoint / Bentley ProjectWise / Autodesk Docs), not a replacement. Three properties keep adoption friction low:
 
-## 3. The wedge
+- **No upload-behavior change.** Engineers continue uploading to their existing DMS; InterLock accepts the same PDFs.
+- **Findings, not assertions.** Every flag reads "potential mismatch, review" with a confidence score and citation — never "this is wrong."
+- **Human in the loop.** Every flag is dismissible, severity-tagged, and exportable as a JSON audit trail.
 
-**Cross-document parameter discrepancy detection with directional citations for energy infrastructure documents.**
+A typical session: reviewer opens InterLock, uploads two PDFs, runs the review (under 30 s on cached inputs), triages the severity-grouped flag list, expands any flag to see the source bbox snippet side-by-side, accepts or dismisses, exports the accepted set.
 
-- **Cross-document:** flags surface only when two documents disagree on the same parameter (not stylistic, not formatting).
-- **Directional:** every flag declares which document is authoritative for that parameter family and which is deviating. Symmetric "conflict between A and B" findings are explicitly forbidden — they push the cognitive load back to the reviewer.
-- **Cited:** every flag carries a tuple of (document, page, section, exact quoted text, bbox). The reviewer can verify in one click.
-- **Consequential errors only:** the bar is "would a senior engineer care during a design review?" Grammar, formatting, headings-only changes are suppressed by construction.
+## The wedge
 
-The canonical MVP scenario is the 60% → 90% phase-revision review: a coordination study revised between milestones. The MVP fixture (Eaton sample coordination study + 6 documented mutations) surfaces TP-1 (decimal-shifted transformer impedance), TP-2 (decimal-shifted fault current), and TP-3 (decimal-shifted transformer rating) at severity = **critical** (deviations ≥ 50 % per IEEE C57.12.00-aligned tolerance bands), while the FP-1 unit-equivalent trap (150 kVA vs 0.15 MVA) is correctly suppressed by Pint unit normalization. A second fixture pair (synthetic transformer spec ↔ Eaton coordination study) demonstrates the same pipeline on heterogeneous document types via Voyage-embedding semantic alignment. **Severity tiers** (critical / major / minor / info) replace uniform-confidence overflagging; **info** tier is suppressed by default. The reviewer can override the suppression threshold or trigger an LLM second-opinion judgment per flag for engineering reasoning + downstream effects.
+**Cross-document, semantics-aware, severity-tiered parameter mismatch detection** for energy-infrastructure documents.
 
-## 4. Wedge-to-platform path
+| Property | How InterLock delivers it |
+|---|---|
+| Cross-document | Flags surface only when two PDFs disagree on the same parameter — not on stylistic or format differences |
+| Semantics-aware | Voyage `voyage-3` embeddings + a curated canonical glossary collapse `%Z`, `Rated Impedance`, and `Per Unit Impedance` onto one concept before comparison |
+| Severity-tiered | Per-attribute tolerance bands (IEEE C57.12.00 / IEC 60076-1 / IEEE Std 242 / NEMA TR 1) classify each candidate as critical / major / minor / info; info is suppressed by default |
+| Directional | Every flag declares an authoritative side and a deviation candidate — no symmetric "A vs B" mush |
+| Cited | Every flag carries doc + page + section + exact quoted span + bbox-highlighted PNG snippet |
+| Reviewer-owned tolerance | Shipped IEEE/IEC defaults can be overridden per project via `set_tolerance_overrides()` — the system never pretends to know the right value for every utility |
 
-The reframing: InterLock is not a "document QA tool" or a "PDF chatbot." It is the seed of an **engineering consistency operating system** — a layer that externalizes and scales the cross-document memory that senior reviewers carry in their heads today. The product evolves through five architectural layers; the MVP lives in layers 1, 2, 4 (partial), and 5 (basic). Layers 3 and the expansion of 4 are the platform.
+Today's MVP demonstrates the wedge on two fixture pairs:
 
-### The five-layer architecture
+1. **Revision diff (Option 1):** Eaton sample coordination study (60 % baseline) vs a six-mutation derivative (90 % revision). Surfaces 4 critical-severity flags via layout-anchored exact matching; 0 false positives. Mirrors the AES decimal-shift anecdote directly.
+2. **Cross-document (Option 2):** synthetic IEEE C57-style transformer data sheet (authoritative) vs the Eaton study (downstream). Surfaces 3 flags via Voyage semantic alignment + canonical glossary. Same pipeline, completely different alignment path; zero exact-name matches in this pair.
 
-| # | Layer | What it does | MVP state (v1.4) |
-|---|---|---|---|
-| 1 | **Ingestion** | PDFs (scanned, native, annotated), CAD, sheets, contracts, revisions, markups → text + tables + bboxes + metadata | ✅ PDFs (PyMuPDF + Camelot + Claude vision fallback). CAD/sheets/contracts: platform. |
-| 2 | **Knowledge extraction** | Convert documents into typed claims with engineering ontology, entity resolution, unit normalization | ✅ ParameterRecord + Entity + Claim layer with tag-pattern inference (XFMR / T / P / M / CB / Bus / Line / MOV / V / R prefixes). Pint normalization. Canonical glossary. **Ontology expansion + LLM-assisted prose extraction are platform.** |
-| 3 | **Project knowledge graph** | Entities + claims about entities + relationships (depends_on, supersedes, derived_from, governed_by, conflicts_with) | ⚠️ SQLite store with entity / claim / decision tables and idempotent upserts. Relationships + traversal queries are platform. |
-| 4 | **Discrepancy + risk engine** | Detect conflicts, score material significance, propagate coupled effects, severity tiers | ✅ Per-attribute tolerance bands (IEEE C57.12.00 / IEC 60076-1-cited), 4-tier severity, directional authority, opt-in LLM significance judge with downstream-effects reasoning. Coupled-effect graph traversal: platform. |
-| 5 | **Review workflow** | Triage queue, assignment, severity tiers, comment threads, audit trail, status lifecycle, revision-aware comparison | ⚠️ Single-session Accept/Dismiss with severity grouping, JSON export, SQLite-persisted decisions. Triage/ownership/threading: platform. |
+## Wedge to platform
 
-### Wedge-to-platform concrete progression
-
-| Phase | What ships | Why review teams pay for it |
+| Phase | What it adds | Why a reviewer team pays for it |
 |---|---|---|
-| **Today (v1.4)** | Cross-document parameter mismatch detection with directional citations, severity tiers (IEEE/IEC tolerance bands), opt-in LLM significance judge, Entity + Claim layer with SQLite store, severity-grouped UI | Replaces serial human pattern-matching across 60% / 90% submittals; catches AES-anecdote-class decimal errors with calibrated severity, not uniform overconfidence |
-| **Phase 14b — Entity fingerprinting** | Match implicit (untagged) entities against explicit (tagged) ones via attribute fingerprint (voltage class, power rating, etc.) instead of just tag name | Multi-equipment specs paired against implicit-entity docs (e.g. Eaton coordination study) without cross-entity false flags |
-| **Phase 15 — Per-project tolerance ontology UI** | Phase 13's runtime override hook gets a UI panel + project-config loading (YAML / SQLite seed). Per-attribute override audit trail. | Tolerance bands are inherently project- and risk-posture-specific; reviewer teams must own the values without forking code |
-| **Phase 16 — Revision lineage** | First-class lineage (Rev C supersedes Rev B); supersession-aware authority; parameter-evolution timelines | Real review is rarely 2-doc; it's "the latest revision of every artifact for this asset" |
-| **Phase 17 — Coupled-effect propagation** | Graph traversal on the claim graph: when claim X changes, what derived claims become suspect? | "If transformer impedance changes, recheck the coordination study and the relay settings — both downstream" |
-| **Phase 18 — Standards-as-authority** | IEEE / IEC / NERC code-edition tracking; project-vs-code compliance pass | Eliminates the slowest senior-reviewer task: standards cross-reference |
-| **Phase 19 — Multi-doc review sessions + DMS** | Whole-project corpora; SharePoint/Bentley/Autodesk Docs ingest; triage queue with ownership | InterLock runs in-line with existing engineering operations, not as a side tool |
-| **Phase 20 — CAD geometry layer** | 2D/3D drawing comparison (bananaz.ai-class) integrated with the same claim graph | One consistency engine across drawings + specs, not two siloed tools |
-| **Phase 21 — Continuous engineering assurance** | Always-on consistency monitor across project lifecycle (design → procurement → construction → as-built) | Asset operators pay not for a tool but for traceable assurance across years of project deliverables |
+| **Today (v1.5)** | Two-PDF severity-tiered review with citation snippets, opt-in LLM significance enrichment, opt-in Entity + Claim layer with SQLite persistence | Replaces serial human pattern-matching across 60 → 90 % submittals |
+| **Phase 14b** | Fingerprint-based entity resolution binding implicit equipment in one doc to tagged equipment on the other | Unlocks multi-equipment cross-doc review (spec describes XFMR-001, XFMR-002, P-101 while the study mentions only "the transformer") |
+| **Phase 15** | Per-project tolerance ontology UI + audit trail | The IEEE-cited defaults shipped today are starting points; AES's internal "AES-STD-XXX" tightens or relaxes them |
+| **Phase 16** | Revision lineage (Rev C supersedes Rev B); supersession-aware authority | Real review is rarely two documents — it's the latest revision of every artifact for an asset |
+| **Phase 17** | Coupled-effect propagation on the claim graph | "Transformer impedance changed → recheck the coordination study and the relay settings" without reading both again |
+| **Phase 18** | Standards-as-authority (IEEE / IEC / NERC code-edition tracking) | Eliminates the slowest senior-reviewer task: standards cross-reference |
+| **Phase 19** | DMS-native multi-doc sessions + triage queue | InterLock runs in-line with existing engineering operations, not as a side tool |
 
-### Why this framing is honest
+## Why now
 
-Most "AI for engineering" products attack drafting, generation, or copilots. Those markets commoditize on model quality. **Review is structurally different**: higher ROI, less regulated, easier to insert without behavior change, and closer to measurable cost savings. The defensibility is not the model — it is the **project knowledge graph**: accumulated entity mappings, discrepancy patterns, review decisions, engineering heuristics, revision histories. That graph compounds with every reviewer interaction. The MVP is the first edge of that graph.
+AES alone is tripling renewables capacity through 2027, with about 5 GW under construction out of an 11.1 GW PPA backlog. Each MW under construction generates hundreds of cross-referenced engineering documents. EPC contractors produce design basis, calcs, specs, vendor packages, IFC drawings, O&M manuals — all flowing into owner-side review at AES-type organizations. Existing tools cover textual diff (Adobe Acrobat), document management (SharePoint, Bentley ProjectWise), and CAD geometry comparison (bananaz.ai). **None do parameter-level, semantics-aware, directionally-cited discrepancy detection across heterogeneous engineering documents.** That is the open field.
 
-## 5. Why now
+## Success criteria (v1.5-mvp-ready)
 
-AES alone has 5 GW under construction out of an 11.1 GW PPA backlog, tripling renewables capacity through 2027, and a full coal exit by end of 2025. Each MW in construction generates hundreds of cross-referenced engineering documents. EPC contractors produce design basis, calcs, specs, vendor packages, IFC drawing sets, O&M manuals — all flowing to owner-side reviewers at AES-like organizations. A misplaced decimal in a transformer spec almost cost a multi-million-dollar loss in the example the AES engineer shared with us. Industry-documented patterns confirm: cross-discipline coordination failures, decimal errors in load calcs, and missing/superseded standards references are the leading sources of costly design-review misses. The market has plenty of CAD comparison tools (bananaz.ai), plenty of textual diff tools (Adobe Acrobat), and plenty of DMS (SharePoint, Bentley). None do parameter-level, semantics-aware, directionally-cited discrepancy detection across heterogeneous engineering documents. **That is the open field.**
+The MVP is complete when all of the following hold; each is independently checkable against the locked fixtures and the eval harness.
+
+- Two PDFs upload through the Streamlit UI and a full review completes in under 90 seconds wall-clock on the locked Option 1 pair (measured: about 10 seconds local, about 26 seconds Streamlit Cloud cold).
+- Every planted true-positive in the gold set (`fixtures/eval/gold.yaml`) surfaces at confidence ≥ 0.6 and severity = critical.
+- No planted false-positive trap surfaces above 0.6 confidence (the unit-equivalent FP-1 case is recognised by Pint, the heading-only FP-2 case is not flagged at all).
+- Every surfaced flag includes the full citation tuple (document, page, section, quoted text, bounding box, directional authority label, confidence score).
+- `eval/results/baseline.json` and `eval/results/ab_comparison.json` are tracked in the repo and reproducible via `scripts/run_eval.py`.
+- The repository's CI runs 294 tests across 36 source modules (mypy strict, ruff, pytest); slow-marked perf budgets and live-API cache invariants run on demand.

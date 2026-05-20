@@ -31,7 +31,7 @@ This use case is the only flow the MVP supports end-to-end. Every line of code m
 1. PDF ingestion from local upload, two files per session.
 2. Text extraction from native-text PDFs using PyMuPDF.
 3. Table extraction using Camelot (lattice mode primary, stream fallback).
-4. Vision-model fallback (Claude Sonnet 4.6) for pages PyMuPDF/Camelot extract poorly (heuristic: low text density, scanned-image pages, or table extraction confidence below threshold).
+4. Vision-model fallback (Claude Sonnet 4.5) for pages PyMuPDF/Camelot extract poorly (heuristic: low text density, scanned-image pages, or table extraction confidence below threshold). Not exercised by the locked fixtures (Eaton is fully native-text, 0 low-coverage pages); included for the platform-path scanned-PDF case.
 5. Parameter record extraction: name, numeric value, unit, page number, section heading, bounding box, source span text.
 6. Unit normalization via Pint for SI electrical units (V, kV, MV, A, kA, VA, kVA, MVA, Ω, %, Hz, °C).
 7. Cross-document parameter alignment: combine exact name match, normalized-unit value match, and semantic name match (embedding similarity above a threshold) into a single alignment confidence.
@@ -101,20 +101,25 @@ The MVP is complete when all of the following are true. Each is independently ch
 
 ---
 
-## 8. Tech stack (locked — no substitutions without reopening this doc)
+## 8. Tech stack (as shipped at v1.5-mvp-ready)
 
 - Python 3.12
 - PyMuPDF (fitz) for primary text extraction and bbox capture
 - Camelot (lattice + stream) for table extraction
 - Pint for unit normalization
-- Anthropic Python SDK + Claude Sonnet 4.6 for semantic alignment and vision fallback
-- Voyage AI `voyage-3` for embeddings, with OpenAI `text-embedding-3-small` as fallback if Voyage unavailable
-- Streamlit for the UI
-- pytest for tests
-- ruff for lint, mypy for types
-- uv for dependency management
+- Anthropic Python SDK with:
+  - `claude-opus-4-7` for the opt-in LLM significance judge (Phase 13 addition; default `messages.parse` via the wrapper at `src/interlock/llm/client.py`)
+  - `claude-sonnet-4-5` for the vision fallback (`src/interlock/ingest/vision_fallback.py`; not exercised by default fixtures)
+- Voyage AI `voyage-3` for semantic name embeddings (OpenAI fallback dropped in Phase 13 amendments — single embedding provider)
+- diskcache (Phase 13) — content-hash keyed disk cache for LLM judge results and Voyage embedding vectors
+- SQLite via stdlib `sqlite3` (Phase 13–14) — `cost_event` ledger plus opt-in `entity` / `claim` / `decision` tables
+- Streamlit for the UI; `streamlit_app.py` root shim for Streamlit Community Cloud
+- pytest + pytest-mock for tests
+- ruff for lint, mypy for types (strict mode)
+- uv for dependency management and reproducible builds
 - Streamlit Community Cloud for deployment
-- GitHub for source
+- GitHub Actions for CI (`.github/workflows/ci.yml`)
+- GitHub for source (`funcpointer/interlock-ai`, public)
 
 ---
 
@@ -157,3 +162,5 @@ This document is reopened only when a success criterion in section 6 cannot be m
 ### Reopen log
 
 - 2026-05-19: Initial lock.
+- 2026-05-21: Phase 13 additions — severity tiers + tolerance bands (§4 augmented with engineering-meaningful classification on top of confidence). LLM significance judge added as opt-in (`use_llm_judge=True`); not on the default path. diskcache + SQLite cost ledger added (§5 item 10 / §8 affected). Anti-scope item 5 ("persistent storage of past review sessions") tightened: `cost_event` rows are persisted across runs but no per-session review state is restored on next launch; the SQLite store ships infrastructure for future review-session persistence but the v1.5 UI does not write `decision` rows yet (accepted-flag JSON export remains the audit trail).
+- 2026-05-21: Phase 14 additions — Entity + Claim layer shipped as additive (opt-in via `use_claim_layer=True`); SQLite `entity` / `claim` / `decision` tables exist with CRUD via `src/interlock/store/sqlite.py`. The runtime pipeline writes to them only when `persist_claims=True` is passed explicitly. Anti-scope item 5 tightened as above.

@@ -98,55 +98,64 @@ Production deployments will load the override map from a project-specific config
 
 **Honest framing for funders/reviewers:** the shipped defaults are public-source, citable, and conservative. The override hook is one line of code. The point is not that we know the right value for AES — it's that the system has a defensible default, exposes the value to scrutiny, and lets the reviewer team take ownership.
 
-## 5. Architecture summary
+## 5. Architecture summary (v1.5-mvp-ready)
 
 ```
-PDF ─► ingest (PyMuPDF spans + Camelot tables + low-coverage routing)
-     ─► extract (domain regex → ParameterRecord; Pint normalization; section attribution)
-     ─► align (layout-anchored exact + Voyage semantic; combiner)
-     ─► detect (directional authority + confidence formula)
+PDF ─► ingest (PyMuPDF spans + Camelot tables + low-coverage routing for vision)
+     ─► extract (regex → ParameterRecord; Pint normalization; section attribution)
+     ─► [opt-in] entities (tag-pattern → Entity; ParameterRecord → Claim wrapper)
+     ─► align (layout-anchored exact + Voyage semantic + canonical glossary + dim filter
+              [opt-in] same-entity filter when claim layer is on)
+     ─► detect (directional authority + 3-factor confidence + tolerance-band severity)
+     ─► [opt-in] significance (LLM second-opinion via Claude Opus 4.7, prompt-cached)
      ─► citation (bbox-highlighted PNG snippet)
-     ─► UI (Streamlit; accept/dismiss; JSON export of accepted flags)
+     ─► UI (Streamlit; severity-grouped flag list; accept/dismiss; JSON export)
 ```
 
-Twelve phase tags in git (`phase-0-scaffold` … `phase-11-cross-doc`) plus `v1.0-mvp` and `v1.1-cross-doc` partition the implementation; each phase ends with a checkpoint commit and a green test suite. Total: ~160 tests across ~15 modules including extraction, alignment, detection, citation, eval harness, real-world e2e, edge cases, property tests, canonical glossary, and perf budgets.
+**Git history.** 15 phase tags (`phase-0-scaffold` … `phase-17-deliverables`) plus six version tags (`v1.0-mvp` → `v1.5-mvp-ready`) partition the implementation. Each phase ends with a checkpoint commit and a green test suite.
+
+**Test surface.** 294 passing tests, 7 slow-marked deselected by default (perf budgets + live-API tests), spread across ingest, extract, entities, align, detect, citation, store, llm, eval harness, real-world e2e, edge cases, property tests, canonical glossary, and perf budgets. `mypy --strict` clean across 36 source files; `ruff check` clean.
+
+**Cost during build.** Aggregated `cost_event` rows: about $0.20 total spent across Phase 13–14 development. Demo loop runs at less than $0.10 per execution once caches are warm; near zero after that (Voyage embeddings and LLM judgments served from diskcache).
 
 ---
 
-## 6. Architectural direction — entity-claim graph (platform path)
+## 6. Entity + Claim layer (shipped in Phase 14, opt-in)
 
-The MVP intentionally stops at parameter-name-level pairing. The natural next architecture, articulated in `docs/PRD.md` §4 and seeded here for the engineering record, refactors the data model around **entities** and **claims**:
+The MVP ships the entity-claim infrastructure as a strictly **additive** layer over `ParameterRecord` — no existing test was broken to add it. Source: `src/interlock/extract/entities.py`.
 
 ```python
 @dataclass(frozen=True)
 class Entity:
-    id: str            # "P-101"
-    type: str          # "pump" | "transformer" | "line" | "circuit" | ...
-    label: str         # display name
+    id: str            # "xfmr_001", "p_101", "implicit_doc_a"
+    type: EntityType   # transformer | pump | motor | breaker | bus | line | mov | valve | relay | implicit
+    label: str         # display name, e.g. "XFMR-001"
 
 @dataclass(frozen=True)
 class Claim:
     entity: Entity
-    attribute: str     # "flow_rate" | "impedance_pct" | "primary_voltage" | ...
-    value: str         # raw text, preserved for citation
-    normalized: pint.Quantity | None
-    source: ParameterRecord   # back-pointer to the current citation tuple
+    attribute: str            # canonical phrase from align/semantic.py
+    raw_value: str
+    source_record: ParameterRecord   # back-pointer preserves citation
 ```
 
-Conflict detection becomes group-by-(entity, attribute) and reason over the multi-claim cluster. This unlocks:
+`claims_from_records(records)` is a pure function: tag-pattern regex infers an entity from each record's `span_text` (`XFMR-001`, `T-200`, `P-101`, `M-50`, `CB-52`, `Bus B-3`, `Line 14A`, `MOV-100`, `V-200`, `R-87`, `Relay R-87`). When no tag matches, the record is attached to an `implicit_<doc_id>` entity per source document.
 
-- **Multi-equipment fixtures.** "Pump P-101 flowrate = 1200 gpm" vs "Pump P-102 flowrate = 950 gpm" are not a conflict — they're claims about different entities. Today's name-only pairing cannot distinguish.
-- **Entity resolution as a first-class concern.** "P-101", "Pump-101", "Feed Pump A", "Primary Transfer Pump" — all the same entity. The glossary in `align/semantic.py::_CANONICAL` becomes the seed of an entity-resolution table.
-- **Coupled-effect propagation.** Claims can be linked by `derived_from` / `governed_by` edges. Changing the transformer impedance claim invalidates the fault-current claim that was derived from it — the system can flag this without re-reading both documents.
-- **Revision lineage.** Each claim carries its source document's revision; supersession is a first-class relationship.
+**How the pipeline uses it:** the entity layer is gated behind `review_two_documents(... use_claim_layer=True, same_entity_only=True, persist_claims=False)`. With `use_claim_layer=False` (default) the v1.3 record-based path runs unchanged. With it on, the aligner uses `align_claims_exact`, which adds an extra filter: pairs only survive when both source claims share the same entity id (implicit entities are treated as wildcards so the revision-diff fixture continues to align).
 
-The current `ParameterRecord` becomes the lowest layer (the cited evidence) under a `Claim`. No data is lost; the pipeline grows a new layer. Phase 13 in `docs/BACKLOG.md`.
+**Persistence.** Claims and entities can be written to the SQLite store at `data/interlock.db` via `src/interlock/store/sqlite.py` when `persist_claims=True`. The schema is in `data/interlock.schema.sql` and is applied idempotently on first connect.
 
-**Why this is not in MVP:** the locked fixtures have effectively one transformer (Eaton) or one equipment item (synthetic spec) each. The current architecture is sufficient for them. Refactoring before a multi-equipment fixture exists would be premature optimization that risks the 160-test regression. The trigger to build Phase 13 is Option 4 (a real spec ↔ study pair with multiple named equipment).
+**What the entity layer does not yet do (platform path):**
+
+- **Fingerprint-based entity resolution.** When one side of a pair has explicit entity tags and the other has only implicit entities (e.g. Eaton coordination study, which mentions "1000 KVA XFMR" without an enumerated ID), the system today treats the implicit side as a wildcard. A real multi-equipment cross-doc demo needs attribute-fingerprint matching (voltage class, power rating) to bind the implicit transformer in Eaton to the right `XFMR-NNN` on the other side. Tracked as Phase 14b in `docs/BACKLOG.md`.
+- **Coupled-effect propagation.** Claims can in principle be linked by `derived_from` / `governed_by` edges so that changing one cascades. Not implemented in v1.5; Phase 17 in BACKLOG.
+- **Revision lineage on the claim itself.** Each claim carries its source document's path and page; multi-revision supersession is Phase 16 in BACKLOG.
+- **UI surfacing.** The Streamlit UI displays the existing `Flag` shape; it does not yet expose entity-grouped views.
 
 ## 7. Why these architectural choices
 
-Two principles drive the build, both echoed in the strategic framing that informs the wedge-to-platform path:
+Three principles drive the build:
 
-- **Findings, not chat.** No conversational interface; every output is a structured `Flag` with full citation tuple. Reviewers triage; the system never asserts wrongness. This positions InterLock as audit infrastructure, not a copilot.
-- **Facts separated from interpretations.** A `Flag` reports *raw values* on both sides plus a *suggested direction* (authority hint). Material significance, risk propagation, and severity tiers are explicitly platform — not because they're hard to add but because adding them prematurely (without tolerance data, without entity resolution, without lineage) would push the system from "verifiable" to "opinion-shaped." Reviewer trust dies the first time the tool is loudly wrong.
+- **Findings, not chat.** No conversational interface; every output is a structured `Flag` with the full citation tuple. Reviewers triage; the system never asserts wrongness. Positions InterLock as audit infrastructure, not a copilot.
+- **Facts separated from interpretations.** Each `Flag` reports the raw values on both sides plus a *suggested direction* (authority hint) and a severity tier (computed from per-attribute tolerance bands, not from the LLM's opinion). The optional LLM significance judge can enrich a flag with engineering rationale, but it does not change the underlying value pair — the reviewer can always re-derive the verdict from the raw evidence.
+- **Determinism in the runtime critical path; LLM as second-opinion only.** Regex extraction, Pint normalization, exact + semantic alignment, severity classification, and confidence assembly are all rule-based and reproducible across runs. The LLM judge (`detect/significance.py`) is opt-in, disk-cached, and disclosed in the UI. This keeps the reviewer's audit trail short: the value mismatch is visible, the tolerance band is cited, and the LLM's opinion (when used) is one layer the reviewer can ignore.

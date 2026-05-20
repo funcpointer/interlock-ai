@@ -1,6 +1,10 @@
 # InterLock AI — Architecture
 
-> **Companion to `docs/PRD.md` §4 (5-layer model) and `docs/TDD.md` §5–7.** This document holds the architectural diagrams, control + data flows, persistence layers, cache hierarchy, and operational metrics. Keep it visual; keep prose elsewhere.
+> Companion to `docs/PRD.md` §4 (5-layer model) and `docs/TDD.md`. This document holds the diagrams, control + data flows, persistence layout, cache hierarchy, and operational metrics for what's actually shipped in **v1.5-mvp-ready**.
+>
+> Every claim below is verifiable in the repo at the tag `v1.5-mvp-ready`. If you find a discrepancy, it's a bug in the doc, not in the code.
+
+---
 
 ## 1. System overview (component view)
 
@@ -9,340 +13,332 @@ graph TB
     subgraph L1[Layer 1 — Ingestion]
         PyMuPDF[PyMuPDF<br/>spans + bbox]
         Camelot[Camelot<br/>tables + cells]
-        Vision[Anthropic Vision<br/>scanned-page fallback]
+        Vision[Anthropic vision fallback<br/>used when text density less than 80 chars]
     end
 
     subgraph L2[Layer 2 — Knowledge Extraction]
         Regex[Regex extractors<br/>domain + generic kv]
-        LLMExtract[LLM extractor<br/>map operator<br/>Pydantic-validated]
         Pint[Pint normalizer<br/>units to SI base]
-        Resolver[Canonical resolver<br/>resolve operator<br/>glossary + entity ID]
+        Resolver[Canonical resolver<br/>glossary + canonical_name]
+        Entities[Entity inference<br/>tag-pattern regex<br/>OPT-IN via use_claim_layer]
     end
 
-    subgraph L3[Layer 3 — Knowledge Graph]
-        SQLite[(SQLite store<br/>entities · claims<br/>citations · decisions)]
-        Voyage[Voyage v3<br/>name embeddings<br/>cached]
+    subgraph L3[Layer 3 — Persistence]
+        SQLite[(SQLite store<br/>entity · claim<br/>decision · cost_event)]
     end
 
-    subgraph L4[Layer 4 — Discrepancy + Risk]
-        Align[Aligner<br/>exact + semantic<br/>dim filter]
-        Tolerance[Tolerance bands<br/>per-attribute<br/>filter operator]
-        LLMSig[LLM significance judge<br/>map operator<br/>severity tier]
-        Confidence[Confidence formula<br/>extract × match × authority × material]
+    subgraph L4[Layer 4 — Discrepancy + Significance]
+        AlignExact[align_exact<br/>name + page + greedy y-proximity]
+        AlignSem[align_semantic<br/>Voyage cosine + dim filter]
+        AlignClaims[align_claims_exact<br/>same-entity filter<br/>OPT-IN]
+        Tolerance[Tolerance bands<br/>per-attribute<br/>IEEE/IEC cited]
+        Severity[Severity classifier<br/>critical/major/minor/info]
+        LLMSig[LLM significance judge<br/>OPT-IN via use_llm_judge]
+        Confidence[Confidence formula<br/>extraction times match times authority]
     end
 
     subgraph L5[Layer 5 — Review Workflow]
-        UI[Streamlit single-page UI<br/>flag list + bbox snippets]
-        Export[JSON export<br/>audit trail]
-        DecisionLog[Decision log<br/>persisted to SQLite]
+        UI[Streamlit single-page UI<br/>severity-grouped flag list]
+        Export[JSON export<br/>accepted flags]
     end
 
     subgraph Caches
-        DiskCache[(diskcache<br/>LLM results)]
-        EmbedCache[(embeddings.json<br/>Voyage cache)]
-        AnthropicCache[Anthropic prompt cache<br/>5m fixture / 1h ontology]
+        DiskCache[(diskcache<br/>LLM judge + Voyage vectors<br/>data slash cache)]
+        AnthropicCache[Anthropic prompt cache<br/>5m fixture / 1h ontology<br/>used in LLM judge only]
     end
 
-    PDF[PDF input] --> PyMuPDF
-    PDF --> Camelot
+    PDFa[PDF input] --> PyMuPDF
+    PDFa --> Camelot
     PyMuPDF -.low coverage.-> Vision
-    Vision --> AnthropicCache
-    LLMExtract --> AnthropicCache
-    LLMSig --> AnthropicCache
-    LLMExtract --> DiskCache
-    LLMSig --> DiskCache
     PyMuPDF --> Regex
     Camelot --> Regex
     Regex --> Pint
-    LLMExtract --> Pint
     Pint --> Resolver
-    Resolver --> SQLite
-    Voyage --> EmbedCache
-    SQLite --> Align
-    Align --> Tolerance
-    Tolerance --> LLMSig
-    LLMSig --> Confidence
+    Resolver --> AlignExact
+    Resolver -.opt-in.-> Entities
+    Entities -.opt-in.-> AlignClaims
+    AlignClaims -.opt-in persist.-> SQLite
+    Resolver --> AlignSem
+    AlignExact --> Severity
+    AlignSem --> Severity
+    AlignClaims -.opt-in.-> Severity
+    Severity --> Tolerance
+    Tolerance --> Confidence
+    Confidence -.opt-in.-> LLMSig
+    LLMSig --> AnthropicCache
+    LLMSig --> DiskCache
+    AlignSem --> DiskCache
     Confidence --> UI
-    UI --> DecisionLog
     UI --> Export
-    Voyage --> Align
+    UI -.future.-> SQLite
 ```
 
-## 2. Control flow — single review session (sequence)
+**OPT-IN annotations:** the Entity + Claim layer (`use_claim_layer`), same-entity filtering, persistence to SQLite (`persist_claims`), and the LLM significance judge (`use_llm_judge`) are all opt-in parameters on `review_two_documents`. **Default v1.5 behavior is identical to v1.2: regex extraction + exact/semantic alignment + tolerance-based severity (Phase 13 addition) + no LLM in the runtime pipeline.** The Phase 14 entity layer is shipped infrastructure ready for fixtures with explicit equipment tags on both sides.
+
+## 2. Control flow — default single review session (v1.5)
+
+This is the actual default path through `review_two_documents` with no opt-ins enabled. The Streamlit demo runs exactly this flow.
 
 ```mermaid
 sequenceDiagram
     actor Reviewer
     participant UI as Streamlit UI
-    participant Pipe as Pipeline orchestrator
-    participant Ingest as L1 Ingest
-    participant Extract as L2 Extract
-    participant LLM as Anthropic (cached)
+    participant Pipe as review_two_documents
+    participant Ingest as ingest()
+    participant Extract as extract_parameters()
     participant Voyage
-    participant Align as L4 Aligner
-    participant Sig as L4 Significance judge
-    participant DB as SQLite
-    participant Cache as diskcache
+    participant VCache as diskcache (voyage-embeddings)
+    participant Align as align_exact + align_semantic
+    participant Detect as detect_flags
+    participant Tol as tolerances.classify
 
     Reviewer->>UI: Upload Doc A + Doc B
-    Reviewer->>UI: Click "Run review"
-    UI->>Pipe: review_two_documents(pdf_a, pdf_b)
+    Reviewer->>UI: Run review
+    UI->>Pipe: review_two_documents(pdf_a, pdf_b, embed_fn=embed_voyage)
 
-    Pipe->>Ingest: ingest(pdf_a)
-    Ingest->>Cache: lookup(sha256(pdf_a))
-    alt cached
-        Cache-->>Ingest: spans + tables
-    else miss
-        Ingest->>Ingest: PyMuPDF + Camelot
-        Ingest->>Cache: store(spans, tables)
-    end
-    Note over Ingest: same flow for pdf_b
+    Pipe->>Ingest: ingest(pdf_a) and ingest(pdf_b)
+    Ingest->>Ingest: PyMuPDF spans + Camelot tables
+    Ingest-->>Pipe: IngestResult (spans, tables, low_coverage_pages)
 
     Pipe->>Extract: extract_parameters(spans)
-    Extract->>Extract: regex pass (fast)
-    Extract->>Cache: lookup LLM extract
+    Extract-->>Pipe: ParameterRecord[]
+
+    Pipe->>Voyage: embed_voyage(names)
+    Voyage->>VCache: per-text lookup
     alt cached
-        Cache-->>Extract: claims
+        VCache-->>Voyage: vector
     else miss
-        Extract->>LLM: messages.parse(prompt+doc, output_format=Claim)
-        LLM-->>Extract: Claim[]
-        Extract->>Cache: store(doc_hash → claims)
+        Voyage->>Voyage: API call
+        Voyage->>VCache: store
     end
-    Extract->>DB: persist Entities + Claims
 
-    Pipe->>Voyage: embed(names_a + names_b)
-    Voyage->>Cache: lookup per text
-    Voyage-->>Pipe: vectors (mixed cached/fresh)
-
-    Pipe->>Align: align(claims_a, claims_b)
-    Align->>Align: exact + dim filter + semantic
+    Pipe->>Align: align_exact + align_semantic
     Align-->>Pipe: AlignedPair[]
 
-    Pipe->>Sig: judge(pair) for each candidate
-    Sig->>Sig: tolerance band (rules)
-    Sig->>Cache: lookup judgment
-    alt cached
-        Cache-->>Sig: SignificanceJudgment
-    else miss
-        Sig->>LLM: messages.parse(prompt, output_format=Judgment)
-        LLM-->>Sig: SignificanceJudgment
-        Sig->>Cache: store
-    end
-    Sig-->>Pipe: Flag[]
+    Pipe->>Detect: detect_flags(pairs, suppress_info=True)
+    Detect->>Tol: classify(family, deviation_pct)
+    Tol-->>Detect: Severity
+    Detect-->>Pipe: Flag[] with severity
 
     Pipe-->>UI: Flag[]
-    UI->>Reviewer: ranked list + snippets
-
+    UI->>Reviewer: severity-grouped list with bbox snippets
     Reviewer->>UI: Accept / Dismiss
-    UI->>DB: persist Decision
-    Reviewer->>UI: Export JSON
-    UI-->>Reviewer: accepted_flags.json
+    UI-->>Reviewer: accepted_flags.json export
 ```
+
+**Opt-in extensions** (`use_claim_layer=True`, `use_llm_judge=True`, `persist_claims=True`) layer additional steps onto this flow; see source `src/interlock/pipeline.py::review_two_documents`.
 
 ## 3. Data flow — types and transformations
 
 ```mermaid
 graph LR
-    PDFa[Doc A PDF bytes] --> Spans_a[Span list with bbox]
-    PDFb[Doc B PDF bytes] --> Spans_b[Span list with bbox]
-    Spans_a --> Params_a[ParameterRecord list]
-    Spans_b --> Params_b[ParameterRecord list]
-    Params_a --> Claims_a[Claim<br/>entity attr value]
-    Params_b --> Claims_b[Claim<br/>entity attr value]
-    Claims_a --> Pairs[AlignedPair list<br/>resolve cross doc]
-    Claims_b --> Pairs
-    Pairs --> Candidates[Flag candidates<br/>value mismatch]
-    Candidates --> Judgments[SignificanceJudgment<br/>severity rationale]
-    Judgments --> Flags[Flag with confidence]
-    Flags --> Citations[Citation tuple<br/>doc page section bbox]
-    Citations --> UIFlag[UI flag block]
-    UIFlag --> Decisions[Decision<br/>accept dismiss]
+    PDFa[Doc A PDF bytes] --> Spansa[Span list with bbox]
+    PDFb[Doc B PDF bytes] --> Spansb[Span list with bbox]
+    Spansa --> Paramsa[ParameterRecord list]
+    Spansb --> Paramsb[ParameterRecord list]
+    Paramsa -.opt-in use_claim_layer.-> Claimsa[Claim with Entity]
+    Paramsb -.opt-in use_claim_layer.-> Claimsb[Claim with Entity]
+    Paramsa --> Pairs[AlignedPair list]
+    Paramsb --> Pairs
+    Claimsa -.opt-in.-> Pairs
+    Claimsb -.opt-in.-> Pairs
+    Pairs --> Detect[detect_flags + severity]
+    Detect --> Flags[Flag with severity, deviation_pct]
+    Flags -.opt-in use_llm_judge.-> Judged[Flag enriched with SignificanceJudgment]
+    Flags --> Cites[render_citation per Flag]
+    Cites --> UIFlag[UI flag block with bbox snippet]
+    UIFlag --> Decisions[Accept/Dismiss + JSON export]
 ```
 
 ## 4. Cache hierarchy
 
 ```mermaid
 graph TB
-    Request[Pipeline request] --> L0[L0 — Python in-memory LRU<br/>tiny, per-process]
-    L0 -.miss.-> L1[L1 — diskcache<br/>LLM results · ingest results<br/>file-backed]
-    L1 -.miss.-> L2[L2 — Anthropic prompt cache<br/>1h TTL ontology · 5m TTL fixture<br/>server-side]
-    L1 -.miss.-> L3[L3 — embeddings.json<br/>Voyage embeddings<br/>repo-tracked, small]
-    L2 -.cold start.-> Anthropic[Anthropic API call]
-    L3 -.miss.-> VoyageAPI[Voyage API call]
-    L1 -.miss + LLM.-> Anthropic
-    Anthropic --> WriteBack[Write back to all layers]
-    VoyageAPI --> WriteBack
-    WriteBack --> L3
-    WriteBack --> L1
-    WriteBack --> L0
+    Caller[Pipeline / aligner / judge] --> Disk[diskcache<br/>data/cache/]
+    Disk -.miss for Voyage.-> VAPI[Voyage API]
+    Disk -.miss for LLM judge.-> AnthropicCache[Anthropic prompt cache<br/>server-side, 5m or 1h TTL]
+    AnthropicCache -.miss.-> AAPI[Anthropic API]
+    VAPI --> Disk
+    AAPI --> Disk
 ```
 
-**Read priorities (top down):**
-1. **L0 — in-memory.** `functools.lru_cache` on hot pure functions (unit normalization, canonical-name lookup). Lost on restart.
-2. **L1 — diskcache.** Persistent file-backed KV. Key: `(content_sha256, function, args_sha256, prompt_version)`. Value: pickled Pydantic object. Survives across runs.
-3. **L2 — Anthropic prompt cache.** Server-side prefix match. Reduces LLM input cost ~90 % on repeat calls within TTL.
-4. **L3 — embeddings.json.** Voyage v3 vectors keyed by `sha256(canonical_name)`. Tracked in repo (small) so a fresh clone has the warm cache.
-5. **Live APIs.** Voyage and Anthropic — last resort.
+**What's actually cached:**
 
-**Cache invalidation triggers:**
-- Source PDF hash changes → invalidate ingest + extract + claims for that doc
-- Prompt version bump (`PROMPT_V = "v3"`) → invalidate LLM cache for that prompt
-- Glossary edit → bump `GLOSSARY_VERSION` → invalidate all alignment runs
-- Model change (`claude-opus-4-7` → `claude-sonnet-4-6`) → cache key includes model
+| Caller | Cache | Key | TTL |
+|---|---|---|---|
+| `align/embed.py` | diskcache namespace `voyage-embeddings` | `sha256(text)` per name | persistent until cleared |
+| `detect/significance.py` | diskcache namespace `llm-significance` | `sha256({prompt_version, flag_id, doc_a/b, raw_a/b})` per flag | persistent until cleared |
+| `detect/significance.py` system prompt | Anthropic prompt cache (server-side) | prefix match on system blocks | 1 hour TTL on ontology block, 5 minute TTL on per-flag user block |
+
+**Not cached at this version:** `ingest()` output (PyMuPDF + Camelot), `extract_parameters()` output, and `align_exact()` output. They are deterministic and cheap; adding diskcache layers around them is a Phase-19 follow-up.
+
+**No `functools.lru_cache`** is currently used in `src/`. The earlier doc claimed an L0 in-memory layer; the actual L0 is just the diskcache (which transparently caches in process).
+
+**Cache invalidation:** all keys include the SHA-256 of their semantic inputs. Changing the prompt template, the Voyage model, the Anthropic model, or the input text changes the key. There is no explicit "version bump"; rotate constants in code and old keys become unreachable.
 
 ## 5. Persistence layout
 
 ```
-data/                          # gitignored except for schema + embeddings cache
-├── cache/                     # diskcache files
+data/                          # gitignored body, schema + results tracked
+├── cache/                     # diskcache files (gitignored)
 │   ├── cache.db
 │   ├── cache.db-shm
 │   └── cache.db-wal
-├── interlock.db               # SQLite — entity/claim/citation/decision
-├── interlock.schema.sql       # tracked
-├── embeddings.json            # tracked (small, warm-start)
-└── results/                   # eval outputs
-    ├── baseline.json          # tracked
-    └── ab_comparison.json     # tracked
+├── interlock.db               # SQLite — entity/claim/decision/cost_event (gitignored)
+└── interlock.schema.sql       # tracked
+
+eval/
+└── results/                   # tracked
+    ├── baseline.json          # Option 1 gold-set scoring
+    └── ab_comparison.json     # Option 1 vs Option 2 comparison
 ```
 
-**SQLite schema (Phase 14 onward):**
+**Schema (`data/interlock.schema.sql` — applied idempotently by both `cache/cost_ledger.py` and `store/sqlite.py`):**
 
 ```sql
-CREATE TABLE entity (
-  id            TEXT PRIMARY KEY,        -- "xfmr_001", "p_101", or "implicit_xfmr_eaton"
-  type          TEXT NOT NULL,           -- transformer | pump | line | circuit | implicit
-  label         TEXT NOT NULL,
-  project_id    TEXT,                    -- optional, multi-project ready
-  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+-- Phase 13: cost ledger
+CREATE TABLE IF NOT EXISTS cost_event (
+  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                      TEXT NOT NULL DEFAULT (datetime('now')),
+  provider                TEXT NOT NULL,         -- 'anthropic' | 'voyage'
+  model                   TEXT,
+  namespace               TEXT NOT NULL,         -- caller workstream label
+  input_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens   INTEGER NOT NULL DEFAULT 0,
+  output_tokens           INTEGER NOT NULL DEFAULT 0,
+  est_cost_usd            REAL NOT NULL DEFAULT 0.0
 );
 
-CREATE TABLE claim (
-  id            TEXT PRIMARY KEY,        -- sha256(entity_id + attribute + raw_value + doc_id + page)
-  entity_id     TEXT NOT NULL REFERENCES entity(id),
-  attribute     TEXT NOT NULL,           -- "impedance_pct", "rated_power_kva", ...
-  raw_value     TEXT NOT NULL,
-  normalized_magnitude REAL,
-  normalized_unit TEXT,
-  doc_id        TEXT NOT NULL,
-  source_path   TEXT NOT NULL,
-  page          INTEGER NOT NULL,
-  bbox_x0       REAL NOT NULL,
-  bbox_y0       REAL NOT NULL,
-  bbox_x1       REAL NOT NULL,
-  bbox_y1       REAL NOT NULL,
-  section       TEXT,
-  span_text     TEXT NOT NULL,
-  extraction_version TEXT NOT NULL       -- "regex-v1" | "llm-claim-extract-v1"
+-- Phase 14: entity + claim + decision (claim and decision used only when
+-- use_claim_layer / persist_claims are enabled on the pipeline)
+CREATE TABLE IF NOT EXISTS entity (
+  id          TEXT PRIMARY KEY,
+  type        TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  project_id  TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE decision (
-  id            TEXT PRIMARY KEY,
-  fixture_pair_id TEXT NOT NULL,
-  flag_id       TEXT NOT NULL,
-  verdict       TEXT NOT NULL,           -- "accepted" | "dismissed"
-  reviewer      TEXT,                    -- future multi-reviewer
-  rationale     TEXT,                    -- optional reviewer note
-  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS claim (
+  id                    TEXT PRIMARY KEY,        -- sha256(entity_id|attribute|raw_value|doc_id|page)
+  entity_id             TEXT NOT NULL REFERENCES entity(id),
+  attribute             TEXT NOT NULL,
+  raw_value             TEXT NOT NULL,
+  normalized_magnitude  REAL,
+  normalized_unit       TEXT,
+  doc_id                TEXT NOT NULL,
+  source_path           TEXT NOT NULL,
+  page                  INTEGER NOT NULL,
+  bbox_x0               REAL NOT NULL,
+  bbox_y0               REAL NOT NULL,
+  bbox_x1               REAL NOT NULL,
+  bbox_y1               REAL NOT NULL,
+  section               TEXT,
+  span_text             TEXT NOT NULL,
+  extraction_version    TEXT NOT NULL,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE cost_event (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  provider      TEXT NOT NULL,           -- "anthropic" | "voyage"
-  model         TEXT,
-  input_tokens  INTEGER,
-  cache_read_tokens INTEGER,
-  cache_write_tokens INTEGER,
-  output_tokens INTEGER,
-  est_cost_usd  REAL
+CREATE TABLE IF NOT EXISTS decision (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  fixture_pair_id   TEXT NOT NULL,
+  flag_id           TEXT NOT NULL,
+  verdict           TEXT NOT NULL,
+  reviewer          TEXT,
+  rationale         TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
 
-## 6. LLM call patterns (DocETL operator vocabulary)
+**What's persisted by default in v1.5:** only `cost_event` rows when the LLM judge or vision fallback fires. The `entity` / `claim` / `decision` tables exist and have working CRUD via `src/interlock/store/sqlite.py`, but the runtime pipeline only writes to them when `persist_claims=True` is passed explicitly. The Streamlit UI does not currently write `decision` rows (accepted-flag export goes to JSON instead). Wiring the UI to the `decision` table is a Phase-19 task.
+
+## 6. LLM call patterns
+
+**One LLM call site in v1.5:** the optional significance judge in `src/interlock/detect/significance.py`. Vision fallback is implemented in `src/interlock/ingest/vision_fallback.py` but is not exercised by the default fixtures (they have zero low-coverage pages).
 
 ```mermaid
 graph LR
-    Pages[doc text chunks] -- map --> Claims[Claim list per chunk]
-    Claims -- resolve --> Entities[Canonical Entity + attribute]
-    Entities -- gather --> Context[per-entity multi-page context]
-    Context -- reduce --> AlignedClaims[paired claims across docs]
-    AlignedClaims -- filter --> Candidates[suppression threshold + tolerance]
-    Candidates -- map --> Judgments[significance judgment with severity]
+    Pages[doc text chunks] -- regex map --> Records[ParameterRecord list]
+    Records -- canonical resolve --> Resolved[ParameterRecord with canonical name]
+    Resolved -- align exact + semantic --> Pairs[AlignedPair list]
+    Pairs -- detect + tolerance filter --> Flags[Flag with severity]
+    Flags -. opt-in map .-> Judgments[SignificanceJudgment per flag]
 ```
 
-- **map (per-chunk LLM extract):** ingest doc text → `list[Claim]`. Single API call per doc with prompt caching: ontology block (1h TTL) + doc text block (5m TTL) + extraction instruction.
-- **resolve (canonical name + entity):** the glossary in `align/semantic.py::_CANONICAL` is the deterministic resolver. Phase 14 extends with LLM-aided resolution for unknown shorthand. Entity IDs are inferred from textual tags ("XFMR-001"); claims with no explicit entity are linked to an `implicit_<doc_id>` placeholder.
-- **gather (cross-chunk context):** not in MVP. Platform-path for prose-heavy docs (SEL paper).
-- **reduce (alignment):** name + dim filter + semantic match → `list[AlignedPair]`. Currently rule-based; no LLM.
-- **filter (suppression + tolerance):** per-attribute tolerance band drops within-tolerance differences. Confidence threshold drops low-signal pairs.
-- **map (significance judgment):** per candidate flag → `SignificanceJudgment` (severity ∈ critical/major/minor/info + rationale + downstream effects). LLM call with cached ontology + glossary, fresh per-flag context.
+DocETL vocabulary alignment:
 
-## 7. Confidence formula (revised for Phase 13)
+- **map (regex):** `extract_parameters` runs a deterministic regex pass to lift `ParameterRecord` from spans. **No LLM extraction is shipped in v1.5.** Prose-heavy doc extraction (SEL paper) is a known limitation — see `docs/BACKLOG.md`.
+- **resolve:** `align/semantic.py::canonical_name` collapses synonyms (`%Z`, `Rated Impedance`, etc.) into a single canonical phrase used downstream. Entity inference (`extract/entities.py::infer_entity_from_text`) is the second resolver tier — opt-in via `use_claim_layer`.
+- **reduce:** exact (`align_exact`) + Voyage semantic (`align_semantic`) + combiner (`combiner.py::combine_alignments`) reduce two record lists to `AlignedPair[]`. Rule-based throughout.
+- **filter:** `detect_flags(suppress_info=True)` drops within-tolerance changes. Severity classifier in `detect/tolerances.py::classify` does the bucketing.
+- **map (significance):** opt-in. Anthropic Opus 4.7 via `messages.parse(output_format=SignificanceJudgment)` with two-tier prompt cache (1 hour on system / ontology blocks, 5 minutes on per-flag user blocks). Disk-cached per flag, so the second run pays effectively zero.
+
+## 7. Confidence formula + severity tiers (as shipped)
 
 ```
-flag_confidence  = extraction_conf × match_conf × authority_conf × material_conf
-
-severity_tier   = bucket(material_conf, deviation_pct, llm_judgment.severity)
-                = critical if deviation ≥ 50 % (e.g. decimal shift)
-                = major    if deviation ≥ 5  % (above typical tolerance)
-                = minor    if deviation ≥ 1  % (review-worthy)
-                = info     if deviation <  1 % (within manufacturing tolerance)
+flag_confidence = extraction_confidence × match_confidence × authority_confidence
 ```
 
-- `extraction_conf`: 1.0 for native PyMuPDF spans, <1.0 for vision-fallback pages weighted by Claude vision confidence.
-- `match_conf`: 1.0 for exact-name pairs; Voyage cosine score on canonical-resolved pairs.
-- `authority_conf`: 1.0 for the hardcoded MVP rule; <1.0 once Phase 15+ configurable authority lands.
-- `material_conf`: 1.0 when `deviation_pct > tolerance_band`; scaled by relative-deviation curve when within band; LLM judgment can downgrade further when the parameter is contextually expected to differ (e.g. design vs operating values).
+Three factors, multiplicative, all clamped to `[0, 1]`. Implemented in `src/interlock/detect/confidence.py::flag_confidence`. The earlier draft of this doc described a four-factor formula with a `material_conf` term; that was a design sketch, not what shipped. Material significance lives separately in the **severity tier**, not in the multiplied confidence.
 
-The four-factor formula is multiplicative — any factor at 0 suppresses the flag entirely. Default surface threshold remains 0.5.
+**Severity tiers** are computed in `detect/mismatch.py::detect_flags` via `detect/tolerances.py::classify(family, deviation_pct)`. Per-family bands cited at `src/interlock/detect/tolerances.py::TOLERANCE_TABLE`:
+
+| Attribute family | Source citation | tolerance% | major% | critical% |
+|---|---|---:|---:|---:|
+| `impedance_pct` | IEEE C57.12.00-2015 §9.1 Table 17 | 7.5 | 20.0 | 50.0 |
+| `rated_power_kva` | IEEE C57.12.00-2015 §5.10 + NEMA TR 1-2013 | 5.0 | 10.0 | 50.0 |
+| `voltage_kv` | IEC 60076-1:2011 §5.3 + IEEE C57.12.00-2015 §5.7 | 0.5 | 5.0 | 50.0 |
+| `fault_current_a` | industry-typical; IEEE Std 242 (Buff Book) | 5.0 | 20.0 | 50.0 |
+
+- below `tolerance%` → `info` (suppressed by default in `detect_flags`)
+- between `tolerance%` and `major%` → `minor`
+- between `major%` and `critical%` → `major`
+- at or above `critical%` → `critical`
+
+**Honest framing:** these are shipped industry-typical defaults and not the right values for every project. See `docs/TDD.md` §4B and `set_tolerance_overrides()` for the runtime override hook intended for project-specific bands.
 
 ## 8. Failure modes + mitigations
 
-| Failure mode | Detection | Mitigation |
+| Failure mode | Detection | Mitigation in v1.5 |
 |---|---|---|
-| Anthropic rate limit (429) | SDK exception | SDK auto-retry with exponential backoff (2 attempts default) |
-| Anthropic 5xx | SDK exception | SDK auto-retry |
-| Voyage rate limit | SDK exception | Fall back to cached vectors for known names; fail loudly for new names |
-| Voyage non-determinism | Cosine drift between runs | Test asserts flag-parameter *set* stability, not absolute confidence |
-| LLM returns malformed Pydantic | ValidationError from `messages.parse` | Retry once; on second failure surface to UI |
-| Cache silent invalidator | `cache_read_input_tokens == 0` after warmup | CI test that asserts cache hit on second call with same prefix |
-| Corrupt diskcache | OperationalError | Rebuild cache from scratch — all keys content-hashed so re-derivation is safe |
-| SQLite lock contention | OperationalError | Streamlit is single-user; WAL mode + retry on busy |
-| PDF parse failure | Exception in ingest | Surface to UI with low-coverage banner; offer vision fallback if Anthropic key present |
-| Streamlit Cloud cold start | First request slow | Pre-warm tab before demo; ghostscript declared in `packages.txt` |
-| Budget exhaustion | Anthropic 403 / usage limit | Per-call cost ledger in `cost_event` table; UI banner when projected cost > threshold |
+| Anthropic rate limit / 5xx | SDK exception | Anthropic SDK auto-retries with exponential backoff (default 2 attempts). Per-call cost tracked in `cost_event`. |
+| Voyage rate limit / error | SDK exception | Cached vectors served from diskcache for known names; new names fail loudly to the caller. |
+| Voyage non-determinism between calls | Cosine drift across runs | `tests/real_world/test_pipeline_behaviors.py` asserts flag *parameter-set* stability, not absolute confidence values. |
+| LLM returns malformed JSON | `ValidationError` from `messages.parse` | Bubbles up; caller of `detect/significance.py::judge` decides retry behavior. |
+| Cache silent invalidator | `cache_read_input_tokens == 0` after a warm call | `tests/llm/test_client.py::test_call_structured_cache_fires_on_repeat_with_large_cached_prefix` is the canary. |
+| PDF parse failure | Exception in `ingest` | Surfaces to Streamlit as a Python traceback (current behavior). Friendlier error UI is a Phase-19 task. |
+| Streamlit Cloud cold start | First request slow | Pre-warm tab; `packages.txt` installs ghostscript so Camelot lattice mode works on the runner. |
 
-## 9. Operational metrics (per pipeline run)
+## 9. Operational metrics (as measured on Option 1 fixtures)
 
-Tracked in `data/results/` and visible in the UI footer:
+These numbers are from the most recent local + Streamlit Cloud runs at tag `v1.5-mvp-ready`.
 
-| Metric | Source | Acceptance |
+| Metric | Source | Measured |
 |---|---|---|
-| End-to-end latency | wall-clock around `review_two_documents` | < 90 s (SCOPE §6.2) |
-| LLM cost per run | `cost_event` aggregate | < $0.30 in production; < $0.10 on cached repeat |
-| Cache hit rate | `cache_read / (cache_read + input)` across LLM calls | > 60 % on second run; > 90 % on third+ |
-| TP recall on gold set | `scripts/run_eval.py` | 100 % on locked gold sets (Option 1 + Option 2) |
-| FP rate on traps | `scripts/run_eval.py` | 0 % |
-| Coverage of low-coverage pages | `IngestResult.low_coverage_pages` | 0 on locked fixtures |
-| Voyage embedding misses on warm cache | embeddings.json diff | 0 on locked fixtures after first run |
+| Full test suite (slow excluded) | `uv run pytest` | 294 passed, 7 deselected, ~3:38 wall-clock |
+| End-to-end Option 1 pipeline | `tests/real_world/test_pipeline_behaviors.py` (stub embed) | < 10 s |
+| TP recall on Option 1 gold | `eval/results/baseline.json` | 100% (3 of 3 planted TPs) |
+| FP rate on Option 1 traps | `eval/results/baseline.json` | 0% (0 of 2 traps surfaced) |
+| A/B Option 1 vs Option 2 | `eval/results/ab_comparison.json` | Option 2 surfaces 3 flags via semantic alignment that Option 1 has 0 exact pairs for |
+| Anthropic spend during build | local cost_event aggregate | ~$0.20 total across Phase 13 development |
 
 ## 10. Vocabulary alignment with prior art
 
-This system's operator names map to DocETL (UC Berkeley, VLDB 2025) and LOTUS (Stanford) semantic operators:
+The operator names used in this codebase are intentionally aligned with DocETL (UC Berkeley EPIC Lab, VLDB 2025) and LOTUS (Stanford) so anyone who has read either paper can read this code quickly.
 
 | Our stage | DocETL operator | LOTUS operator |
 |---|---|---|
-| Per-doc LLM extract | `map` | `sem_extract` |
-| Canonical name + entity ID | `resolve` | `sem_join` (related, not identical) |
+| Regex extraction per chunk | `map` (deterministic variant) | `sem_extract` (their LLM variant) |
+| Canonical name + entity inference | `resolve` | `sem_join` (related, not identical) |
 | Combine alignment results | `reduce` | n/a |
-| Tolerance + threshold filter | `filter` | `sem_filter` |
-| Per-flag significance judge | `map` | `sem_extract` |
-| Cross-chunk context preservation | `gather` (DocETL) | n/a |
-| Agentic plan optimization | DocETL's optimizer | n/a |
+| Tolerance + suppress-info filter | `filter` | `sem_filter` |
+| Per-flag significance judge | `map` (LLM variant) | `sem_extract` |
 
-Using this vocabulary keeps the architecture legible to anyone who has read either paper.
+We do not ship DocETL itself; we adopt its vocabulary. Adopting the framework is in `docs/BACKLOG.md` as Phase 21+.
 
 ---
 
-**Diagram source:** all `mermaid` blocks render on GitHub natively. To export to PNG/SVG for slides, use any Mermaid CLI (`mmdc`) or `https://mermaid.live`.
+**Diagram rendering:** all `mermaid` blocks render natively on GitHub. For slide export, use any Mermaid CLI (`mmdc`) or `https://mermaid.live`.
+
+**How to verify any claim above:** every claim has a source path. The fastest sanity check is `rg <symbol-name> src/` to confirm the code matches the description.

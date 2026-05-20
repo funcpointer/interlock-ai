@@ -1,169 +1,117 @@
-# InterLock AI — Risk Register (Adversarial Review for May 22 EOD Delivery)
+# InterLock AI — Risk Register
 
-Adversarial review of the Phase 13–17 plan and the existing v1.2 baseline. Every entry has: risk, likelihood, blast radius, detection, mitigation, owner.
+Adversarial review of the Phase 13–17 plan against the existing baseline, with status updates as of v1.5-mvp-ready. Every entry: risk, likelihood, blast radius, detection, mitigation, owner, **outcome**.
 
-Ranked by impact × probability. **Read top to bottom; the first 6 are the ones that could actually kill the submission.**
+**Outcome key:** `mitigated` (handled as designed) · `realized` (happened, and what we did) · `dropped` (scope-cut decision) · `pending` (still open at the time of writing).
 
 ---
 
 ## R-1 — Anthropic budget runaway
 
-- **Risk:** A cache silent-invalidator causes every demo run to re-pay full LLM input cost. Repeated dev iterations during Phase 13/14 push spend past the $20 prepaid cap.
-- **Likelihood:** Medium. Silent invalidators are subtle (timestamps, unsorted JSON, varying tool sets).
-- **Blast radius:** $5–$50 wasted; demo recording blocked if quota exhausted.
-- **Detection:** Pytest `test_call_structured_cache_fires_on_repeat_with_large_cached_prefix` asserts `cache_read > 0` on second call. Run before every commit on `phase-13-llm-pipeline`.
-- **Mitigation:** Layer the diskcache *outside* the Anthropic call so the second run never even hits the API. Set Anthropic console usage limit to $20 / 48h. Watch `cost_event` table.
-- **Owner:** Pipeline orchestrator (Phase 15).
+- **Risk:** Silent cache invalidator causes every demo run to re-pay full LLM input cost. Repeated dev iterations push spend past the $20 prepaid cap.
+- **Likelihood (planned):** Medium.
+- **Mitigation:** Cache invariant test `tests/llm/test_client.py::test_call_structured_cache_fires_on_repeat_with_large_cached_prefix` asserts `cache_read > 0` on second call. Diskcache wraps the Anthropic call so second hits don't even reach the API. Per-call cost ledger in `cost_event` table.
+- **Outcome — mitigated.** Total Anthropic spend across Phase 13–14 build measured by `cost_event` aggregate: **~$0.20**. Far under cap. Voyage spend separately tracked, sub-dollar.
 
 ## R-2 — Entity refactor breaks v1.2's 159-test baseline
 
-- **Risk:** Phase 14 introduces `Entity` + `Claim` types. Existing tests construct `ParameterRecord` by hand and don't know about claims. A naive refactor breaks 30+ tests.
-- **Likelihood:** High if approached as a rewrite. Low if approached additively.
-- **Blast radius:** Hours of regression chasing. Risk of shipping with red tests.
-- **Detection:** `pytest -q` after each Phase 14 task.
-- **Mitigation:** **Make Entity + Claim an additive layer.** `Claim` *wraps* a `ParameterRecord` (not replaces). Aligner and detector accept either. Existing tests stay green; new tests exercise the claim layer. See ARCHITECTURE.md §5 (claim table has back-pointer to source record).
-- **Owner:** Phase 14 implementation.
+- **Risk:** Phase 14 `Entity` + `Claim` types break existing tests that construct `ParameterRecord` by hand.
+- **Likelihood (planned):** High if rewrite-style, Low if additive.
+- **Mitigation:** Additive layer — `Claim` wraps `ParameterRecord` (back-pointer preserves citation). Aligner uses `Claim` only when `use_claim_layer=True` (default off). Existing record-based path unchanged.
+- **Outcome — mitigated.** Phase 14 landed with 43 new tests and zero existing-test regressions. v1.4 has 294 passing, 7 deselected. v1.3 baseline preserved bit-for-bit when claim layer is off.
 
-## R-3 — Phase 14 LLM extraction returns inconsistent shapes
+## R-3 — LLM extraction returns inconsistent shapes
 
-- **Risk:** Even with Pydantic `messages.parse`, LLM extraction on the synthetic spec vs the Eaton study may surface different entity types / attribute names, breaking downstream alignment.
-- **Likelihood:** Medium-high. LLM output drift is real even at temperature=0.
-- **Blast radius:** Gold set fails; demo regresses below v1.2.
-- **Detection:** Phase 14 has a "snapshot" pytest that pins the extracted Claim list against a fixture-locked golden. Any drift fails CI.
-- **Mitigation:** Strict Pydantic schemas. Prompt explicitly enumerates allowed attribute names (closed vocabulary). Diskcache aggressively — once a Claim list is captured for a doc hash + prompt version, it's frozen until prompt bump.
-- **Owner:** Phase 14.
+- **Risk:** Pydantic `messages.parse` extracting Claim[] from prose may drift across runs.
+- **Outcome — dropped (LLM extraction never built in v1.5).** Decision: only the **LLM significance judge** uses Pydantic-validated `messages.parse`, on a per-flag basis with disk-cached results. Extraction stays deterministic regex. LLM-assisted extraction is platform path (BACKLOG Phase 14b and prose-extraction limitation).
 
 ## R-4 — Tolerance bands aren't authoritative
 
-- **Risk:** Phase 13 needs per-attribute tolerance tables (±5 % impedance, ±2 % voltage, etc.) but we don't and *can't* have AES-grade authority — the right values depend on standard edition, owner internal standards, equipment vintage, review phase, and risk posture. A funder asks "where did these come from?" and the answer must be honest.
-- **Likelihood:** High that someone asks. **Engineers from AES will ask first.**
-- **Blast radius:** Credibility hit if treated as "we know the right value."
-- **Detection:** Internal review of every tolerance value before commit.
-- **Mitigation — three-layer defense:**
+- **Risk:** Per-attribute tolerance tables depend on standard edition, owner internal standards, equipment vintage, review phase, risk posture. We can't ship the right value for every project. AES engineers will ask first.
+- **Outcome — mitigated, three-layer defense shipped:**
   1. Shipped values cite public sources inline (`src/interlock/detect/tolerances.py`): IEEE C57.12.00-2015 §9.1 Table 17, IEC 60076-1:2011 §5.3, IEEE Std 242 (Buff Book), NEMA TR 1-2013.
-  2. Module docstring explicitly states the values are "industry-typical starting defaults, not absolute truth" with the five drivers of project-specific variance (standard edition, internal standards, equipment class, review phase, risk posture).
-  3. Runtime override hook (`set_tolerance_overrides`) lets a reviewer load project-specific bands without forking code. Overrides preserve their own source citation for audit.
-- **Honest framing:** the value proposition is not "InterLock knows the right tolerance" but "InterLock makes the tolerance assumption visible, citable, and owned by the reviewer team." TDD §4B states this verbatim. Per-project tolerance ontology is Phase 13.5 in `docs/BACKLOG.md`.
-- **Owner:** Phase 13 (shipped). Phase 13.5 (per-project config + UI editor + audit log).
+  2. Module docstring explicitly states values are "industry-typical starting defaults, not absolute truth" with five drivers of project-specific variance.
+  3. Runtime override hook (`set_tolerance_overrides`) lets a reviewer load project-specific bands without forking. Overrides preserve their own source citation.
+- **Honest framing in TDD §4B:** the value proposition is not "InterLock knows the right tolerance" but "InterLock makes the tolerance assumption visible, citable, and owned by the reviewer team." Per-project tolerance ontology UI is Phase 15 in `docs/BACKLOG.md`.
 
 ## R-5 — Demo recording fails under live load
 
-- **Risk:** During screen recording, Voyage or Anthropic rate-limits or returns 500. The clean take is ruined; recording session runs over.
-- **Likelihood:** Low-medium. Both providers are stable but never zero.
-- **Blast radius:** 30–60 min lost.
-- **Detection:** Pre-warm run before recording.
-- **Mitigation:** **Pre-warm the cache** — run the demo flow once to populate diskcache and the Anthropic prompt cache. The recording run then hits caches throughout and never depends on the live API. Worst case, record locally with all caches warm and skip the deployed URL clip.
-- **Owner:** Phase 17 (recording).
+- **Risk:** During screen recording, Voyage or Anthropic rate-limits or returns 500. Clean take ruined.
+- **Outcome — pending.** Demo recording not yet done at the time of writing. Mitigation strategy stands: pre-warm caches, record locally if cloud flakes.
 
-## R-6 — Streamlit Cloud cold start during demo / submission review
+## R-6 — Streamlit Cloud cold start during reviewer click-through
 
 - **Risk:** Reviewers click the deployed link and wait 30+ s for cold start; assume the app is broken.
-- **Likelihood:** Medium. Free tier sleeps after inactivity.
-- **Blast radius:** First-impression failure.
-- **Detection:** Test the URL right before submitting.
-- **Mitigation:** Keep a browser tab open on the URL for the 12 h before submission (pings the app, prevents sleep). README has a `<details>` block explaining cold start is expected on first visit.
-- **Owner:** Pre-submission checklist.
+- **Outcome — pending mitigation.** Keep a browser tab on the URL the 12 hours before submission. README notes cold start is expected on first visit.
 
 ## R-7 — Time estimate is wrong
 
-- **Risk:** 22 h estimate (Phase 13–17) doesn't allow for any phase blowing up. We hit Phase 14 LLM extraction quirks and burn 8 h instead of 7.
-- **Likelihood:** Medium-high. Phase 14 is the highest unknown.
-- **Blast radius:** Submission slips past EOD May 22.
-- **Detection:** Wall-clock at end of each phase vs estimate.
-- **Mitigation:** **Phase ordering by ROI per hour.** Phase 13 (tolerance + severity) is high-confidence and lands the biggest demo lift; do it first. Phase 14 is the risk; if it blows up past 8 h, ship without it and reframe Entity as Phase 19+ in BACKLOG. v1.2 + Phase 13 alone is still a strong submission.
-- **Owner:** Daily 4-hour checkpoints. Phase 14 abort gate at 8 h.
+- **Risk:** 22 h estimate (Phase 13–17) doesn't allow for any phase blowing up.
+- **Outcome — mitigated.** Phase 13 landed in ~4 h, Phase 14 in ~5 h, Phase 17 in ~1 h. Phase 16 was scope-dropped at the multi-equipment fingerprinting realisation (see R-11) rather than blowing the time budget. Total elapsed ≈ 10 h vs 22 h estimate; margin retained for the demo recording.
 
 ## R-8 — Public repo leaks something private
 
-- **Risk:** GitHub repo is public. Competition brief, sensitive notes, API keys, or proprietary information accidentally tracked.
-- **Likelihood:** Low — .env is gitignored, brief notes are gitignored, CLAUDE.md is gitignored. But every new commit is a fresh chance.
-- **Blast radius:** Could surface in funder background check.
-- **Detection:** `git ls-files` audit before submission.
-- **Mitigation:** Pre-submission gate: scan for any string matching `sk-ant-`, `pa-`, or known project file patterns. Use `git secrets` or equivalent. Already corrected once; remain vigilant.
-- **Owner:** Pre-submission checklist.
+- **Risk:** GitHub repo is public. Sensitive notes, API keys, or proprietary information accidentally tracked.
+- **Outcome — mitigated, vigilance ongoing.** `.env` gitignored. `CLAUDE.md` gitignored. `.claude/` gitignored. Pre-submission scan still required (see checklist below).
 
 ## R-9 — PRD/TDD page bloat
 
-- **Risk:** PRD and TDD currently exceed 2 pages each. Brief says 1–2 pages. Funders won't read 5-page docs.
-- **Likelihood:** Confirmed — PRD is ~2.5 pages, TDD is ~3 pages.
-- **Blast radius:** Format violation; reviewer fatigue.
-- **Detection:** Render and count.
-- **Mitigation:** Phase 17 trim. Move detail to ARCHITECTURE.md (no length constraint) and BACKLOG.md. PRD = persona + workflow + wedge + platform path. TDD = ingest + extract + align + detect + eval + architecture pointer.
-- **Owner:** Phase 17.
+- **Risk:** Brief says 1–2 pages each. Reviewer fatigue if longer.
+- **Outcome — pending verification.** Current line counts: PRD 64 lines, TDD ~165 lines. Render-and-count check still needed; if rendered TDD exceeds 2 pages, move §4B / §6 / §7 detail to ARCHITECTURE.md.
 
 ## R-10 — Synthetic Doc A credibility hit (Option 2)
 
 - **Risk:** Funders see `spec_xfmr_001.pdf` is synthetic and discount the cross-doc demo.
-- **Likelihood:** Medium. Engineers can spot a generated spec quickly.
-- **Blast radius:** Cross-doc demo loses weight; submission falls back to revision-diff only.
-- **Detection:** N/A — funder-side.
-- **Mitigation:** Authorship note discloses upfront. Demo script frames Option 2 as "controlled cross-doc fixture proving the alignment path works; Option 4 in the backlog applies the same pipeline to real manufacturer data sheets." Honest framing beats apology.
-- **Owner:** Phase 17 demo script + AUTHORSHIP.md (done).
+- **Outcome — mitigated by honest framing.** `docs/AUTHORSHIP.md` discloses the synthetic spec upfront with the IEEE C57 / ANSI C57 nameplate convention it follows. Demo script frames Option 2 as a controlled cross-doc fixture. Real-spec curation (Option 4) is the next fixture engineering workstream.
 
-## R-11 — Multi-equipment fixture (Phase 16) reveals hidden assumptions
+## R-11 — Multi-equipment fixture demo
 
-- **Risk:** Synthetic 3-equipment spec (XFMR-001, XFMR-002, P-101) trips the aligner — it pairs P-101 attributes with XFMR-001 because the canonical glossary doesn't disambiguate. Demo regresses.
-- **Likelihood:** Medium. Multi-entity is precisely what we haven't tested.
-- **Blast radius:** Phase 16 doesn't ship; we drop the multi-equipment story.
-- **Detection:** Phase 16 has its own gold set; if it fails, abort the multi-equipment fixture before merging.
-- **Mitigation:** Entity ID is required for any claim that mentions a tagged equipment (regex captures `[A-Z]+-\d+` patterns into entity_id). Cross-entity alignment is suppressed. If the test still fails, Phase 16 is dropped; v1.3 ships with Option 1 + Option 2 only.
-- **Owner:** Phase 16. Abort gate at 3 h if gold set fails.
+- **Risk:** Synthetic 3-equipment spec paired against implicit-entity Eaton study would over-flag because Eaton's implicit transformer matches any of XFMR-001/002 by tag.
+- **Outcome — realized, Phase 16 dropped.** Discovered at Phase 16 build time: when one side has explicit equipment tags and the other has only implicit entities, the same-entity filter treats implicit as a wildcard (so Option 1 still works) but cannot distinguish which explicit entity the implicit side refers to. Resolution requires attribute-fingerprint entity binding (voltage class, power rating). That's a meaningful Phase-14b workstream rather than a 3-hour task. Phase 16 fixture and gold set were not shipped. v1.5 ships Option 1 + Option 2 only. Phase 14b is now in BACKLOG as the highest-leverage next item.
 
 ## R-12 — Voyage embedding non-determinism
 
 - **Risk:** Voyage `voyage-3` returns slightly different vectors on identical inputs across calls. Confidence values drift between runs.
-- **Likelihood:** Known issue — tested and pinned in test_pipeline_behaviors.
-- **Blast radius:** Eval test flakes; would block CI.
-- **Detection:** Already detected.
-- **Mitigation:** Tests assert flag-parameter *set* stability, not absolute confidence. JSON-backed embedding cache (Phase 13 prep) hard-pins vectors per text — once cached, no further variance.
-- **Owner:** L3 cache implementation.
+- **Outcome — mitigated.** Diskcache namespace `voyage-embeddings` (see `src/interlock/align/embed.py`) hard-pins vectors per text. `tests/real_world/test_pipeline_behaviors.py::test_cross_doc_real_embedder_flag_set_is_stable` asserts flag-parameter *set* stability, not absolute confidence values.
 
-## R-13 — Camelot slow on 56-page IEEE PDF in CI
+## R-13 — Camelot slow on 56-page IEEE PDF
 
-- **Risk:** Real-PDF extraction tests take 110+ s when IEEE guide is included. CI timeout or developer impatience.
-- **Likelihood:** Confirmed and accepted.
-- **Blast radius:** Slow test suite, not correctness.
-- **Detection:** Time logs.
-- **Mitigation:** IEEE guide tests are part of full regression, run on demand. CI `slow` marker excludes them by default (matches the perf tests in v1.2).
-- **Owner:** Already mitigated in v1.2.
+- **Risk:** Real-PDF extraction tests take 110+ s on IEEE guide.
+- **Outcome — mitigated.** Perf budgets and IEEE-guide tests carry the `slow` pytest marker (`pyproject.toml::addopts = "-m 'not slow'"`), excluded by default. Full set runs with `uv run pytest -m slow`.
 
 ## R-14 — User burns out before May 22
 
 - **Risk:** Long sessions, high stakes, sleep deprivation. Decision quality drops; mistakes compound.
-- **Likelihood:** High.
-- **Blast radius:** Worst class of risk — can affect everything.
-- **Detection:** Self-monitoring.
-- **Mitigation:** Phase 13 first (highest ROI per hour). Sleep is non-negotiable. The MVP is shippable today; everything from here is upside. **v1.2 + Phase 13 alone is a credible submission. Phase 14–16 are stretch. If exhaustion sets in, stop, ship v1.2.5, and let Phase 14+ wait.**
-- **Owner:** Human-in-the-loop (you).
+- **Outcome — pending self-monitoring.** Phase ordering by ROI per hour (Phase 13 first) kept session lengths manageable. v1.5-mvp-ready ships well before EOD May 22; demo recording can wait if needed without slipping the deadline.
 
 ---
 
-## Abort gates (when to stop and ship)
+## Abort gates (planned vs realised)
 
-| Gate | Condition | Action |
+| Gate | Plan | What happened |
 |---|---|---|
-| End of Phase 13 (target ~5h in) | Tolerance + severity working, gold set still 100/0 | Tag `v1.3-tolerance` and ship if exhausted |
-| 8 hours into Phase 14 | LLM extraction not stable, gold set red | Revert Phase 14 branch, ship `v1.3-tolerance` |
-| Phase 16 — 3 hours in | Multi-equipment gold set red | Drop Phase 16, ship `v1.3-tolerance + entity-layer-only` |
-| 6 hours before EOD May 22 | Anything unmerged on the branch | Hard freeze, merge what's green, tag, deploy |
+| End of Phase 13 (target ~5h) | Tag `v1.3-tolerance` and ship if exhausted | Landed in ~4 h, green, tagged. Continued. |
+| 8 h into Phase 14 | If LLM extraction unstable: revert, ship v1.3 | LLM extraction not built; Phase 14 was the entity-claim layer, landed in ~5 h additive, no regression. Tagged `v1.4-entity-claim`. |
+| Phase 16 — 3 h in | If multi-equipment gold red: drop fixture | Multi-equipment cross-doc requires entity fingerprinting against implicit-side docs; not a 3-hour task. Phase 16 dropped. Phase 17 went straight to deliverables refresh. |
+| 6 h before EOD May 22 | Hard freeze, merge what's green, tag | v1.5-mvp-ready tagged well before this gate. |
 
-## Pre-submission checklist (final 2 hours)
+## Pre-submission checklist
 
-- [ ] All branches merged to `main`, no stale phase branches
-- [ ] All tags pushed
-- [ ] `pytest -q` green
-- [ ] `pytest -m slow` green (or documented skip)
-- [ ] `ruff check .` clean
-- [ ] `mypy src` clean
+- [ ] All branches merged to `main`, no stale phase branches (currently on `phase-17-deliverables` mid-review; will merge after this audit closes)
+- [ ] All tags pushed (last pushed: `v1.5-mvp-ready`)
+- [ ] `uv run pytest` green (last measured: 294 passed, 7 deselected)
+- [ ] `uv run pytest -m slow` green (or documented skip)
+- [ ] `uv run ruff check .` clean
+- [ ] `uv run mypy src` clean
 - [ ] Streamlit Cloud URL responsive (cold start tested)
-- [ ] Demo video < 5 min, uploaded, link in DEMO_SCRIPT.md
-- [ ] PRD ≤ 2 pages rendered
-- [ ] TDD ≤ 2 pages rendered
-- [ ] AUTHORSHIP.md current (mentions Phase 13–17 additions)
+- [ ] Demo video < 5 min, uploaded, link added to README + DEMO_SCRIPT.md
+- [ ] PRD rendered length checked (≤ 2 pages)
+- [ ] TDD rendered length checked (≤ 2 pages)
+- [ ] AUTHORSHIP.md current (Phase 13 + Phase 14 sections present)
 - [ ] `git ls-files` audited for accidental private content
-- [ ] No `sk-ant-` or `pa-` or `vlt-` strings in any tracked file
-- [ ] `data/results/baseline.json` regenerated and committed
-- [ ] `data/results/ab_comparison.json` regenerated and committed
+- [ ] `git grep` for `sk-ant-`, `pa-`, `vlt-` returns nothing in tracked files
+- [ ] `eval/results/baseline.json` regenerated and committed
+- [ ] `eval/results/ab_comparison.json` regenerated and committed
 - [ ] README has deploy URL and demo video link
 - [ ] GitHub repo description set; topics tagged
 - [ ] Reviewer access notes in submission packet

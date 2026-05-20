@@ -12,6 +12,10 @@ eval/results/*.json
 !eval/results/.gitkeep
 !eval/results/baseline.json
 !eval/results/ab_comparison.json
+data/cache/
+data/interlock.db
+data/interlock.db-shm
+data/interlock.db-wal
 .DS_Store
 *.egg-info/
 build/

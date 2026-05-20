@@ -66,6 +66,38 @@ Current baseline (`eval/results/baseline.json`):
 - FP rate on traps: **0.0** (0/2 surfaced above threshold)
 - FN-1: not detected as a flag (known limitation; surfaces in BACKLOG.md as the explicit-removal detection extension)
 
+## 4B. Tolerance bands — defaults, not absolute truth
+
+The severity classifier in Phase 13 maps relative deviation percent to one of four tiers (`critical` / `major` / `minor` / `info`) using a per-attribute-family tolerance band. We ship **industry-typical defaults** sourced from IEEE C57.12.00, IEC 60076-1, IEEE Std 242 (Buff Book), and NEMA TR 1, cited inline at `src/interlock/detect/tolerances.py`.
+
+**These shipped values are not the right answer for every project.** Real-world tolerance bands depend on:
+
+1. **Applicable standard edition** (IEEE C57.12.00 revised 2006 / 2010 / 2015 / 2022)
+2. **Owner's internal engineering standards** (AES-STD-XXX-type documents may tighten or relax)
+3. **Equipment class and vintage** (nuclear vs solar, new vs legacy)
+4. **Discipline and review phase** (30 % bar is looser than 90 % bar)
+5. **Risk posture** (station service vs generator step-up)
+
+InterLock's tolerance system is therefore **explicitly a starting baseline** with a runtime-override hook:
+
+```python
+from interlock.detect.tolerances import set_tolerance_overrides, ToleranceBand
+
+set_tolerance_overrides({
+    "impedance_pct": ToleranceBand(
+        attribute_family="impedance_pct",
+        rel_tolerance_pct=5.0,
+        rel_major_pct=15.0,
+        rel_critical_pct=50.0,
+        source="AES-STD-XYZ §4.2 (tighter than IEEE C57.12.00)",
+    ),
+})
+```
+
+Production deployments will load the override map from a project-specific config (YAML / SQLite) so the reviewer team owns the values without forking code. The platform-path target is a UI-editable tolerance ontology with audit trail; see `docs/BACKLOG.md` Phase 17.
+
+**Honest framing for funders/reviewers:** the shipped defaults are public-source, citable, and conservative. The override hook is one line of code. The point is not that we know the right value for AES — it's that the system has a defensible default, exposes the value to scrutiny, and lets the reviewer team take ownership.
+
 ## 5. Architecture summary
 
 ```

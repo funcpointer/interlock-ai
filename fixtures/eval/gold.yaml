@@ -1,0 +1,103 @@
+# Locked evaluation gold set. Derived from fixtures/mutations/MUTATIONS.md.
+# Schema documented in docs/FIXTURES.md §6.
+
+flags:
+  - id: TP-1
+    category: parameter_mismatch
+    expected: surfaced
+    min_confidence: 0.6
+    authority: doc_a
+    doc_a:
+      page: 3
+      section: "TCC1"
+      span_text: "5.75%Z, liquid"
+      value: "5.75%"
+    doc_b:
+      page: 3
+      section: "TCC1"
+      span_text: "0.575%Z, liquid"
+      value: "0.575%"
+    notes: "Decimal-shift in transformer impedance; mirrors AES anecdote."
+
+  - id: TP-2
+    category: parameter_mismatch
+    expected: surfaced
+    min_confidence: 0.6
+    authority: doc_a
+    doc_a:
+      page: 2
+      section: "Selective Coordination Studies"
+      span_text: "Fault X1 20,000A RMS Sym"
+      value: "20,000A"
+    doc_b:
+      page: 2
+      section: "Selective Coordination Studies"
+      span_text: "Fault X1 200,000A RMS Sym"
+      value: "200,000A"
+    notes: "Decimal-shift on fault current."
+
+  - id: TP-3
+    category: parameter_mismatch
+    expected: surfaced
+    min_confidence: 0.6
+    authority: doc_a
+    doc_a:
+      page: 7
+      section: "TCC3"
+      span_text: "1000KVA XFMR"
+      value: "1000 kVA"
+    doc_b:
+      page: 7
+      section: "TCC3"
+      span_text: "100KVA XFMR"
+      value: "100 kVA"
+    notes: "Decimal-shift in transformer rating on p7."
+
+  - id: FP-1
+    category: unit_normalization
+    expected: suppressed
+    max_confidence: 0.4
+    doc_a:
+      page: 7
+      section: "TCC3"
+      span_text: "150 KVA XFMR"
+      value: "150 kVA"
+    doc_b:
+      page: 7
+      section: "TCC3"
+      span_text: "0.15 MVA XFMR"
+      value: "0.15 MVA"
+    notes: "Pint should normalize 150 kVA == 0.15 MVA; must NOT flag."
+
+  - id: FP-2
+    category: heading_only
+    expected: suppressed
+    max_confidence: 0.4
+    doc_a:
+      page: 3
+      section: "TCC1"
+      span_text: "Time Current Curve #1 (TCC1)"
+      value: null
+    doc_b:
+      page: 3
+      section: "TCC1"
+      span_text: "Time Current Curve 1 (TCC1)"
+      value: null
+    notes: "Heading-only rephrase, no parameter; must NOT flag."
+
+  - id: FN-1
+    category: checklist_gap
+    expected: surfaced
+    min_confidence: 0.4
+    authority: doc_a
+    doc_a:
+      page: 7
+      section: "TCC3"
+      span_text: "LPN-RK-500SP"
+      value: "LPN-RK-500SP"
+    doc_b:
+      page: 7
+      section: "TCC3"
+      span_text: "(removed)"
+      value: null
+    notes: "Parameter present in A, missing in B — checklist gap. Lower-confidence flag allowed."

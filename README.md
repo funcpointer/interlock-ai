@@ -1,10 +1,13 @@
 # InterLock AI
 
-Cross-document discrepancy detection for engineering PDFs. Reviewer uploads two PDFs from the same project; the system surfaces directional, cited, confidence-scored parameter mismatches.
+Cross-document discrepancy detection for engineering PDFs. Reviewer uploads two PDFs from the same project; the system surfaces directional, cited, **severity-tiered** parameter mismatches with optional LLM significance judgment.
 
-- Locked scope: [`docs/SCOPE.md`](docs/SCOPE.md)
-- Locked fixtures: [`docs/FIXTURES.md`](docs/FIXTURES.md)
-- Implementation plan: [`docs/superpowers/plans/2026-05-19-interlock-mvp.md`](docs/superpowers/plans/2026-05-19-interlock-mvp.md)
+- PRD: [`docs/PRD.md`](docs/PRD.md) — reviewer persona, wedge, 5-layer platform path
+- TDD: [`docs/TDD.md`](docs/TDD.md) — architecture, tolerance bands, evaluation
+- Architecture diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — control flow, data flow, cache hierarchy
+- Authorship: [`docs/AUTHORSHIP.md`](docs/AUTHORSHIP.md) — what's built / reused / disclosed
+- Locked scope + fixtures: [`docs/SCOPE.md`](docs/SCOPE.md), [`docs/FIXTURES.md`](docs/FIXTURES.md)
+- Risk register: [`docs/RISK_REGISTER.md`](docs/RISK_REGISTER.md)
 - Backlog (out-of-scope): [`docs/BACKLOG.md`](docs/BACKLOG.md)
 
 ## Quick start (local)
@@ -33,14 +36,14 @@ Two fixture pairs ship with the repo.
 - `doc_a_60pct.pdf` — Doc A (authoritative, real Eaton sample coordination study)
 - `doc_b_90pct.pdf` — Doc B (downstream, derived from Doc A with 6 documented mutations — see `fixtures/mutations/MUTATIONS.md`)
 
-Cross-document mode **off**. Expected: 4 flags surfaced at confidence 1.0 (TP-1 impedance, TP-2 fault current, TP-3 transformer rating × 2 sites). Zero false positives. FP-1 unit-equivalent trap (`150 kVA` vs `0.15 MVA`) suppressed by Pint normalization.
+Cross-document mode **off**. Expected: 4 flags grouped under **critical** severity (TP-1 impedance, TP-2 fault current, TP-3 transformer rating × 2 sites — all decimal-shift class). Zero false positives. FP-1 unit-equivalent trap (`150 kVA` vs `0.15 MVA`) suppressed by Pint normalization. **Info-tier within-tolerance changes** are suppressed by default (toggle the threshold slider to surface them).
 
 ### Option 2 — cross-document (equipment spec ↔ coordination study)
 
 - `spec_xfmr_001.pdf` — Doc A (authoritative, synthetic transformer Equipment Data Sheet; see `docs/AUTHORSHIP.md` for disclosure)
 - `doc_a_60pct.pdf` — Doc B (downstream, the same Eaton study reused)
 
-Cross-document mode **on**. Expected: 3 flags surfaced via semantic alignment + canonical glossary — Rated Power ↔ Transformer Rating, Rated Impedance ↔ %Z, Primary Voltage ↔ System Voltage. Zero exact-name matches in this pair; the semantic path carries the entire signal.
+Cross-document mode **on**. Expected: 3 flags surfaced via semantic alignment + canonical glossary — Rated Power ↔ Transformer Rating (minor), Rated Impedance ↔ %Z (major, 22 % deviation), Primary Voltage ↔ System Voltage (major). Zero exact-name matches in this pair; the semantic path + IEEE C57.12.00-cited tolerance bands carry the entire signal. Toggle **Use LLM significance judge** in the UI sidebar to enrich each flag with engineering rationale + downstream-effect propagation (Anthropic Opus 4.7, prompt-cached).
 
 A/B comparison verifies Option 2 demonstrates a capability Option 1 cannot:
 
@@ -73,7 +76,14 @@ Gold set: `fixtures/eval/gold.yaml`. Acceptance thresholds locked in `docs/FIXTU
 The repo's history is partitioned into TDD phases; each phase ends in a verifiable checkpoint tag.
 
 ```
-phase-0-scaffold   phase-3-extract   phase-6-citation   phase-9-deploy
-phase-1-fixtures   phase-4-align     phase-7-ui         v1.0-mvp
-phase-2-ingest     phase-5-detect    phase-8-eval
+phase-0-scaffold    phase-3-extract     phase-6-citation    phase-9-deploy
+phase-1-fixtures    phase-4-align       phase-7-ui          phase-11-cross-doc
+phase-2-ingest      phase-5-detect      phase-8-eval        phase-12-real-world
+
+phase-13-tolerance       v1.3-tolerance
+phase-14-entity-claim    v1.4-entity-claim
+
+v1.0-mvp · v1.1-cross-doc · v1.2-real-world · v1.3-tolerance · v1.4-entity-claim
 ```
+
+**Test surface (v1.4):** 294 passing, 7 slow-marked deselected, mypy strict clean, ruff clean. Cost-per-demo-run < $0.10 with diskcache + Anthropic 1-hour prompt caching on ontology blocks.

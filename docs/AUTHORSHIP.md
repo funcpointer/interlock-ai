@@ -93,6 +93,33 @@ This is disclosed in `docs/FIXTURES.md` §2 and §3, in the eval gold set, and i
 
 **Doc A of the Option 2 fixture pair (`fixtures/pdfs/spec_xfmr_001.pdf`) is also not a real document.** It is a deterministically generated synthetic transformer Equipment Data Sheet, produced by `fixtures/synthesis/generate_spec.py`, shaped to match an IEEE C57.12.00 / ANSI C57.12.10 nameplate spec. Used to demonstrate cross-document semantic alignment between heterogeneous document types when paired with the Eaton coordination study. Disclosed in `docs/FIXTURES.md` §2B. Real-spec curation (using a public manufacturer data sheet) is Option 4 in `docs/BACKLOG.md`.
 
+## Phase 14 — Entity + Claim layer (after v1.3-tolerance)
+
+Additive layer above `ParameterRecord` so the pipeline can distinguish equipment within a single document. Phase 14 ships the infrastructure; multi-equipment demo activation is deferred to platform path (entity fingerprinting against implicit-side docs is required for cross-doc multi-equipment scenes — Phase 14b in BACKLOG).
+
+- `src/interlock/extract/entities.py` — `Entity` + `Claim` dataclasses with tag-pattern inference for XFMR / T / P / M / CB / Bus / Line / MOV / V / R prefixes. Implicit-entity fallback per doc. Pure `claims_from_records` (cache-safe).
+- `src/interlock/align/claims.py` — claim-aware exact aligner with `same_entity_only` filter. Implicit entities treated as wildcards so Option 1 stays working untouched.
+- `src/interlock/store/sqlite.py` — raw-SQL CRUD over the entity / claim / decision schema. Idempotent upserts via deterministic claim IDs (sha256 of canonical key tuple). Auto-applies schema from `data/interlock.schema.sql`.
+- `data/interlock.schema.sql` — schema extended with entity / claim / decision tables (cost_event already shipped in Phase 13).
+- `src/interlock/pipeline.py` — three new opt-in flags (`use_claim_layer`, `same_entity_only`, `persist_claims`). When all default, v1.3 behavior is preserved bit-for-bit.
+- 43 new tests across `tests/extract/test_entities.py`, `tests/store/test_sqlite.py`, `tests/align/test_claim_alignment.py`. Total: 294 passing, 7 deselected (slow).
+
+## Phase 13 — Tolerance bands + severity tiers + LLM significance (after v1.2-real-world)
+
+Replaces "every mismatch surfaces at confidence 1.0" overflagging with engineering-tolerance-aware severity classification, plus an opt-in LLM second-opinion judge.
+
+- `src/interlock/cache/disk.py` — diskcache wrapper with content-hash keys + namespace isolation. 7 tests.
+- `src/interlock/cache/cost_ledger.py` — SQLite-backed per-call cost ledger. Pricing constants inline with citations (Anthropic platform pricing, Voyage docs). 10 tests.
+- `src/interlock/detect/tolerances.py` — per-attribute-family tolerance bands sourced from IEEE C57.12.00, IEC 60076-1, IEEE Std 242, NEMA TR 1. Includes runtime override hook (`set_tolerance_overrides`) and explicit honest framing of these as starting defaults, not absolute truth. 34 tests.
+- `src/interlock/detect/family.py` — canonical-phrase → tolerance-family resolver. 18 tests.
+- `src/interlock/detect/significance.py` — LLM significance judge via Pydantic-validated `messages.parse` on Claude Opus 4.7 with two-tier prompt caching (1h ontology, 5m fixture text). Disk-cached results so repeat runs cost ≈ $0. 12 tests including 1 live-API.
+- `src/interlock/llm/client.py` — cached Anthropic client wrapper with locked defaults. 5 tests including 2 live-API cache invariants.
+- `src/interlock/detect/mismatch.py` — `Flag` extended with `severity`, `deviation_pct`, `attribute_family` fields. `suppress_info` parameter (default True) drops within-tolerance changes from the primary review list.
+- `src/interlock/pipeline.py` — `use_llm_judge` + `suppress_info` opt-in flags.
+- `src/interlock/ui/app.py` — severity grouping (critical/major/minor/info), color coding, LLM toggle.
+
+Tolerance framing (per request): the shipped bands are documented as starting defaults driven by 5 real-world variance factors (standard edition, owner internal standards, equipment class, review phase, risk posture). Runtime override hook lets a reviewer team load AES-STD-XXX values without forking code.
+
 ## Phase 12 — real-world test expansion (after v1.1-cross-doc)
 
 Added 7 test files under `tests/real_world/` and `tests/align/test_canonical.py`. ~50 new test cases across:

@@ -16,16 +16,16 @@ Visual: the README diagram or just the InterLock title page.
 
 Action: drop both PDFs into the Streamlit page. Click **Run review**.
 
-## 0:30–0:50 — Show the flag list
+## 0:30–0:55 — Show the flag list, severity-grouped
 
-> "InterLock surfaces four directional flags. Each one is a candidate for the reviewer — never an assertion."
+> "InterLock surfaces four directional flags. All four group under **critical** severity — decimal-shift class deviations exceed the IEEE C57.12.00 tolerance bands by an order of magnitude."
 
-Visual: the flag list. Point at:
-- TP-1: `%Z: 5.75 % (authoritative, p3) ≠ 0.575 % (deviation, p3)` — the canonical AES decimal-shift example.
-- TP-2: `Fault Current: 20,000 A (authoritative, p2) ≠ 200,000 A (deviation, p2)`.
-- TP-3 (×2): `Transformer Rating: 1000 kVA ≠ 100 kVA`.
+Visual: the flag list, grouped by severity icon. Point at:
+- TP-1: `%Z: 5.75 % (authoritative, p3) ≠ 0.575 % (deviation, p3)` — the canonical AES decimal-shift example. Severity tag: **CRITICAL**.
+- TP-2: `Fault Current: 20,000 A (authoritative, p2) ≠ 200,000 A (deviation, p2)`. **CRITICAL**.
+- TP-3 (×2): `Transformer Rating: 1000 kVA ≠ 100 kVA`. **CRITICAL**.
 
-> "Every flag declares which document is authoritative and which is deviating. Confidence is the product of extraction, match, and authority confidence — all 1.0 here because both PDFs share layout and the values mismatch unambiguously."
+> "Every flag declares which document is authoritative and which is deviating. Severity tier is computed from relative deviation against per-attribute tolerance bands sourced from IEEE C57.12.00, IEC 60076-1, and NEMA TR 1. Within-tolerance changes — say a 5.75 % impedance drifting to 5.77 % — would classify as **info** and be suppressed by default. That's the noise reduction that keeps reviewer trust."
 
 ## 0:50–1:15 — Click into a citation
 
@@ -51,9 +51,13 @@ Action: scroll to the "suppressed" expander.
 
 ## 1:50–2:00 — Wedge to platform
 
-> "Today: cross-document parameter discrepancy detection on energy infrastructure PDFs. Next: multi-phase comparison across 30/60/90, configurable authority hierarchy, standards-as-authority for IEEE/IEC/NERC compliance, and DMS integration. The wedge is the AES decimal-error problem. The platform is the technical document intelligence layer across the project lifecycle."
+> "Today: cross-document parameter mismatch detection with **tolerance-aware severity tiers** and an **Entity + Claim layer** persisted in SQLite. Next: per-project tolerance ontology UI, revision lineage, coupled-effect graph traversal — when a transformer impedance changes, the system flags every downstream claim that depended on it. The wedge is the AES decimal-error problem. The platform is the engineering consistency operating system."
 
-End on the README's "Phase tags" block to communicate: this is methodical, TDD, audit-traceable engineering.
+End on the README's "Phase tags" block — 12 phase tags, 294 tests, TDD throughout, audit-traceable engineering.
+
+Optional 5-second LLM judge segment (skip if recording over budget):
+
+> "Toggle 'Use LLM significance judge'. Each flag gets an engineering rationale plus downstream-effect propagation, computed by Claude Opus 4.7 with prompt-cached ontology. Cached, so the second run costs effectively zero."
 
 ---
 

@@ -47,6 +47,9 @@ def align_semantic(
         best_sim = 0.0
         best_rb: ParameterRecord | None = None
         for rb in b:
+            # Only pair records of compatible value-type: both numeric or both string.
+            if (ra.normalized_magnitude is None) != (rb.normalized_magnitude is None):
+                continue
             vb = vecs.get(rb.name)
             if not vb:
                 continue

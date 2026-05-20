@@ -35,11 +35,34 @@ MVP lives in layers 1, 2, and partial 4 + basic 5. The following items expand ea
 - Estimated effort: 1–2 days.
 - Unlocks Phases 14–20.
 
-### Phase 14 — Material significance + tolerance bands (L4)
+### Phase 13.5 — Per-project tolerance ontology (L4)
 
-- Per-attribute engineering tolerances (transformer impedance ±5% is normal; 10% requires explanation).
-- Severity tiers per flag: critical / major / minor / informational.
-- Drops noise rate further; reviewers see *what matters*, not *what differs*.
+**Status:** runtime override hook shipped (`detect.tolerances.set_tolerance_overrides`); UI editor + project-config loading is next.
+
+The Phase 13 tolerance bands are industry-typical defaults from public standards (IEEE C57.12.00, IEC 60076-1, IEEE Std 242, NEMA TR 1). These are not the right values for every project:
+
+- **Standard edition variance.** IEEE C57.12.00 revised tolerance tables across 2006 / 2010 / 2015 / 2022.
+- **Owner internal standards.** AES-class organizations maintain internal "AES-STD-XXX" tolerance documents that tighten or relax industry standards based on operating experience.
+- **Equipment class and vintage.** A 1980s legacy transformer has different acceptance tolerances than a new manufacturer-issued unit.
+- **Discipline and review phase.** At 30 % review, larger drift is acceptable; at 90 % and IFC the bar tightens.
+- **Risk posture.** Nuclear-grade is tighter than utility-scale solar.
+
+**What ships today (Phase 13):**
+- Industry-typical defaults baked into `TOLERANCE_TABLE` with public-source citations.
+- Runtime override via `set_tolerance_overrides({family: ToleranceBand(...)})`.
+- Override entries cite their own source so audit trail is preserved.
+
+**What Phase 13.5 adds:**
+- Per-project config loading (`tolerances.yaml` or SQLite table seeded at session start).
+- UI panel for reviewer to amend the active band before / during a review.
+- Decision log entry for every band override the reviewer makes.
+- Per-attribute-family confidence (lower confidence when the band itself is recent / contested).
+
+### Phase 14 — Material significance refinement (L4)
+
+- LLM-judged engineering reasoning per flag (already prototype-shipped in Phase 13 as opt-in).
+- Cross-discipline downstream effects (impedance change → coordination study → relay settings).
+- Confidence calibration from accumulated reviewer decisions.
 
 ### Phase 15 — Revision lineage (L2/L3)
 

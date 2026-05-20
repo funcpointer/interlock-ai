@@ -35,12 +35,16 @@ Ranked by impact × probability. **Read top to bottom; the first 6 are the ones 
 
 ## R-4 — Tolerance bands aren't authoritative
 
-- **Risk:** Phase 13 needs per-attribute tolerance tables (±5 % impedance, ±2 % voltage, etc.) but we don't have IEEE-cite-grade authority. A funder asks "where did these come from?" and the answer is "industry common sense."
-- **Likelihood:** High that someone asks.
-- **Blast radius:** Credibility hit.
+- **Risk:** Phase 13 needs per-attribute tolerance tables (±5 % impedance, ±2 % voltage, etc.) but we don't and *can't* have AES-grade authority — the right values depend on standard edition, owner internal standards, equipment vintage, review phase, and risk posture. A funder asks "where did these come from?" and the answer must be honest.
+- **Likelihood:** High that someone asks. **Engineers from AES will ask first.**
+- **Blast radius:** Credibility hit if treated as "we know the right value."
 - **Detection:** Internal review of every tolerance value before commit.
-- **Mitigation:** Tolerance bands live in `src/interlock/detect/tolerances.py` with **inline citations** to IEEE C57.12.00, IEC 60076, or NEMA TR-1. Where the standard doesn't pin a value, mark `source: "industry typical, see BACKLOG.md item X"` and acknowledge in TDD §6 that production needs project-specific tolerance configs.
-- **Owner:** Phase 13.
+- **Mitigation — three-layer defense:**
+  1. Shipped values cite public sources inline (`src/interlock/detect/tolerances.py`): IEEE C57.12.00-2015 §9.1 Table 17, IEC 60076-1:2011 §5.3, IEEE Std 242 (Buff Book), NEMA TR 1-2013.
+  2. Module docstring explicitly states the values are "industry-typical starting defaults, not absolute truth" with the five drivers of project-specific variance (standard edition, internal standards, equipment class, review phase, risk posture).
+  3. Runtime override hook (`set_tolerance_overrides`) lets a reviewer load project-specific bands without forking code. Overrides preserve their own source citation for audit.
+- **Honest framing:** the value proposition is not "InterLock knows the right tolerance" but "InterLock makes the tolerance assumption visible, citable, and owned by the reviewer team." TDD §4B states this verbatim. Per-project tolerance ontology is Phase 13.5 in `docs/BACKLOG.md`.
+- **Owner:** Phase 13 (shipped). Phase 13.5 (per-project config + UI editor + audit log).
 
 ## R-5 — Demo recording fails under live load
 

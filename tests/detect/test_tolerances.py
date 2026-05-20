@@ -121,3 +121,75 @@ def test_classify_zero_deviation_is_info() -> None:
 )
 def test_classification_matrix(family: str, deviation_pct: float, expected: Severity) -> None:
     assert classify(family, deviation_pct) == expected
+
+
+# ----- Runtime override tests -----
+
+
+def test_runtime_override_replaces_shipped_band() -> None:
+    """A project-specific override must take precedence over the shipped
+    default for that family. Other families are unaffected."""
+    from interlock.detect.tolerances import (
+        ToleranceBand,
+        active_tolerance_band,
+        set_tolerance_overrides,
+    )
+
+    # Override impedance to tighter bands (AES-style internal standard).
+    set_tolerance_overrides(
+        {
+            "impedance_pct": ToleranceBand(
+                attribute_family="impedance_pct",
+                rel_tolerance_pct=2.0,  # was 7.5
+                rel_major_pct=10.0,
+                rel_critical_pct=30.0,  # was 50.0
+                source="test override",
+            )
+        }
+    )
+    try:
+        # 5 % deviation was 'info' under shipped 7.5 % tolerance — now 'minor'.
+        assert classify("impedance_pct", 5.0) == "minor"
+        # 35 % was 'major' under shipped 50 % critical — now 'critical'.
+        assert classify("impedance_pct", 35.0) == "critical"
+        # Other families unaffected.
+        assert classify("rated_power_kva", 7.0) == "minor"
+        # active_tolerance_band returns the override.
+        assert active_tolerance_band("impedance_pct").source == "test override"
+    finally:
+        set_tolerance_overrides({})  # cleanup
+
+
+def test_clearing_overrides_restores_shipped_defaults() -> None:
+    """Calling set_tolerance_overrides({}) must restore the shipped behavior."""
+    from interlock.detect.tolerances import ToleranceBand, set_tolerance_overrides
+
+    set_tolerance_overrides(
+        {
+            "impedance_pct": ToleranceBand(
+                "impedance_pct", 1.0, 5.0, 25.0, source="ephemeral"
+            )
+        }
+    )
+    set_tolerance_overrides({})
+    # 5 % impedance back under shipped 7.5 % tolerance → info.
+    assert classify("impedance_pct", 5.0) == "info"
+
+
+def test_overrides_persist_until_changed() -> None:
+    """Overrides live for the lifetime of the process; not a one-shot."""
+    from interlock.detect.tolerances import ToleranceBand, set_tolerance_overrides
+
+    set_tolerance_overrides(
+        {
+            "rated_power_kva": ToleranceBand(
+                "rated_power_kva", 1.0, 3.0, 10.0, source="tighter"
+            )
+        }
+    )
+    try:
+        assert classify("rated_power_kva", 4.0) == "major"
+        # Repeated calls keep the override.
+        assert classify("rated_power_kva", 4.0) == "major"
+    finally:
+        set_tolerance_overrides({})

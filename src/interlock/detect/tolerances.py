@@ -8,16 +8,62 @@ classifier turns a relative deviation percent into a severity tier:
   minor    — outside manufacturing tolerance, worth a reviewer's eye
   info     — within typical tolerance; suppressed from the default flag list
 
-Sources are cited inline. Production deployments will override these per-
-project from internal engineering standards; the values shipped here are
-industry-typical defaults appropriate for a generic transformer + protection-
-coordination context.
+
+HONEST CAVEAT — TOLERANCE BANDS ARE STARTING DEFAULTS, NOT ABSOLUTE TRUTH
+========================================================================
+
+The numeric thresholds shipped in this module are **industry-typical
+defaults** appropriate for a generic transformer + protection-coordination
+context, sourced from published standards. They are deliberately
+conservative starting points. They are **not** the right values for every
+project.
+
+In real deployments, tolerance bands depend on:
+
+1. **The applicable standard edition.** IEEE C57.12.00 has revised tolerance
+   tables across 2006 / 2010 / 2015 / 2022 editions; IEC 60076 has its own
+   cadence. The values that govern a project are those named in its design
+   basis document, not the latest revision of the standard.
+2. **The owner's internal engineering standards.** Utilities like AES often
+   maintain internal "AES-STD-XXX" documents that tighten or relax tolerances
+   relative to industry standards based on operating experience and risk
+   posture.
+3. **The equipment class and vintage.** A 1980s legacy transformer has
+   different acceptance tolerances than a new manufacturer-issued unit.
+   Nuclear-grade is tighter than utility-scale solar.
+4. **The discipline and review phase.** At 30 % review, larger drift is
+   acceptable because design is fluid; at 90 % and IFC, the bar tightens
+   because changes propagate downstream.
+5. **The risk posture of the asset.** A 5 % impedance drift on a station
+   service transformer is different from the same drift on a generator
+   step-up transformer feeding the grid.
+
+The hardcoded values here are intentionally a **single, defensible, public-
+source baseline** so the system has a working classifier out of the box for
+demos and small-project use. They are explicitly not the answer for AES-grade
+production review.
+
+The platform path (see docs/BACKLOG.md → Phase 17) makes tolerances:
+- per-project configurable from a YAML / SQLite config
+- per-attribute-family overridable at session start
+- reviewer-amendable mid-session with audit trail
+- backed by an editable "tolerance ontology" the reviewer team owns
+
+Until then, the override hooks below let a caller swap the defaults at
+runtime without forking the module. The shipped values cite their public
+sources so reviewers can argue with the numbers rather than guess at them.
+
 
 Citation conventions:
-- "IEEE C57.12.00" refers to "IEEE Standard for General Requirements for Liquid-
-  Immersed Distribution, Power, and Regulating Transformers" (IEEE C57.12.00-2015).
-- "IEC 60076-1" refers to "Power transformers — Part 1: General" (IEC 60076-1:2011).
-- Industry-typical defaults are flagged where standards underspecify.
+- "IEEE C57.12.00" — IEEE Standard for General Requirements for Liquid-
+  Immersed Distribution, Power, and Regulating Transformers (2015 ed unless
+  otherwise noted).
+- "IEC 60076-1" — Power transformers — Part 1: General (2011 ed).
+- "IEEE Std 242" — IEEE Recommended Practice for Protection and Coordination
+  of Industrial and Commercial Power Systems (Buff Book).
+- "NEMA TR 1" — Transformers, Step Voltage Regulators, and Reactors.
+- "industry-typical" — flagged where a quantitative band is not pinned by a
+  standard; backed by common review-practice norms, not published tables.
 """
 
 from __future__ import annotations
@@ -106,13 +152,57 @@ _DEFAULT_BAND = ToleranceBand(
 )
 
 
+# Runtime overrides — populated by ``set_tolerance_overrides`` so a caller
+# (e.g. a Streamlit session, a CLI flag, a per-project YAML loader) can
+# replace any subset of the shipped defaults without forking this module.
+# Override entries take precedence over TOLERANCE_TABLE in ``classify``.
+_OVERRIDES: dict[str, ToleranceBand] = {}
+
+
+def set_tolerance_overrides(overrides: dict[str, ToleranceBand]) -> None:
+    """Replace zero or more shipped tolerance bands at runtime.
+
+    Pass the family name as the key. Calling with ``{}`` clears all
+    overrides. The shipped ``TOLERANCE_TABLE`` is never mutated; the
+    overrides live in a separate map consulted first by ``classify``.
+
+    Example::
+
+        from interlock.detect.tolerances import set_tolerance_overrides, ToleranceBand
+        # AES project standard tightens transformer impedance to ±5 %.
+        set_tolerance_overrides({
+            "impedance_pct": ToleranceBand(
+                attribute_family="impedance_pct",
+                rel_tolerance_pct=5.0,
+                rel_major_pct=15.0,
+                rel_critical_pct=50.0,
+                source="AES-STD-XYZ §4.2 (tighter than IEEE C57.12.00)",
+            ),
+        })
+    """
+    global _OVERRIDES
+    _OVERRIDES = dict(overrides)
+
+
+def active_tolerance_band(attribute_family: str) -> ToleranceBand:
+    """Return the band currently in effect for an attribute family.
+
+    Override (if set) wins over shipped default. If neither maps the family,
+    returns the broad fallback band.
+    """
+    if attribute_family in _OVERRIDES:
+        return _OVERRIDES[attribute_family]
+    return TOLERANCE_TABLE.get(attribute_family, _DEFAULT_BAND)
+
+
 def classify(attribute_family: str, deviation_pct: float) -> Severity:
     """Bucket a relative deviation into a severity tier.
 
     deviation_pct is expected to be the output of ``relative_deviation``
-    (i.e. percent, where 50.0 means "half-magnitude difference").
+    (i.e. percent, where 50.0 means "half-magnitude difference"). Runtime
+    overrides (see ``set_tolerance_overrides``) win over shipped defaults.
     """
-    band = TOLERANCE_TABLE.get(attribute_family, _DEFAULT_BAND)
+    band = active_tolerance_band(attribute_family)
     if deviation_pct >= band.rel_critical_pct:
         return "critical"
     if deviation_pct >= band.rel_major_pct:

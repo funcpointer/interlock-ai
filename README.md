@@ -44,7 +44,7 @@ Gold set: `fixtures/eval/gold.yaml`. Acceptance thresholds locked in `docs/FIXTU
 ## Deploy (Streamlit Cloud)
 
 1. Sign in at https://share.streamlit.io with the same GitHub account that owns this repo.
-2. New app → repo `funcpointer/interlock-ai`, branch `main`, main file `src/interlock/ui/app.py`.
+2. New app → repo `funcpointer/interlock-ai`, branch `main`, main file `streamlit_app.py` (root entrypoint shim; real UI in `src/interlock/ui/app.py`).
 3. Advanced settings → Python 3.12.
 4. Secrets → paste `VOYAGE_API_KEY` and `ANTHROPIC_API_KEY` as TOML.
 5. Deploy.

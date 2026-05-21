@@ -134,59 +134,71 @@ st.markdown(
 
 with st.sidebar:
     st.header("Review settings")
+    st.caption(
+        "Ordered by influence on the review run: input handling first, "
+        "analysis depth next, display filter last."
+    )
 
-    st.markdown("**Suppress flags below**")
+    # --- Input handling ---------------------------------------------------
+
+    enable_vision_ocr = st.toggle(
+        "Vision OCR for low-coverage pages",
+        value=True,
+        help=(
+            "When a page produces fewer than 80 characters of native text "
+            "(scanned image, image-only blueprint), route it through Claude "
+            "Sonnet 4.5 vision to recover the text. Diskcached on PDF "
+            "content hash, so repeat runs on the same scanned PDF are free. "
+            "Toggle off for a fully offline / no-vision run."
+        ),
+    )
+
+    table_max_pages = st.slider(
+        "Camelot table-scan page cap",
+        min_value=5,
+        max_value=200,
+        value=20,
+        step=5,
+        help=(
+            "Camelot table extraction scans this many leading pages per PDF. "
+            "Higher = more thorough but slower; the deployed UI feels frozen "
+            "above ~100 pages without progress feedback. Increase if your "
+            "PDFs put critical tables late."
+        ),
+    )
+
+    st.divider()
+
+    # --- Analysis depth ---------------------------------------------------
+
+    use_llm_judge = st.toggle(
+        "AI-judged severity + downstream-effect propagation",
+        value=True,
+        help=(
+            "Each surfaced flag is sent to Claude Opus 4.7 with a cached "
+            "engineering ontology, returning a written rationale and a list "
+            "of downstream parameters that may be affected. **First run** "
+            "costs ~$0.02–0.05 per flag; results are diskcached per flag so "
+            "subsequent runs on the same flag set are free.\n\n"
+            "Toggle off for a fully deterministic, rule-only severity path."
+        ),
+    )
+
+    st.divider()
+
+    # --- Display filter ---------------------------------------------------
+
     threshold = st.slider(
         "Suppress flags below this confidence",
         min_value=0.0,
         max_value=1.0,
         value=0.6,
         step=0.05,
-        label_visibility="collapsed",
         help=(
-            "Confidence is extraction × match × authority, in [0, 1]. Flags "
-            "below this score stay accessible in the 'Suppressed' expander."
-        ),
-    )
-
-    st.markdown("**AI-judged severity**")
-    use_llm_judge = st.toggle(
-        "AI rationale + downstream-effect propagation (on by default)",
-        value=True,
-        help=(
-            "Each surfaced flag is sent to Claude Opus 4.7 with a cached "
-            "engineering ontology, returning a written rationale and a list "
-            "of downstream parameters that may be affected. Disk-cached, so "
-            "repeat runs cost nothing.\n\n"
-            "Toggle off for a fully deterministic, rule-only severity path."
-        ),
-    )
-
-    st.markdown("**Table-scan page cap**")
-    table_max_pages = st.slider(
-        "Camelot scans this many leading pages per PDF",
-        min_value=5,
-        max_value=200,
-        value=20,
-        step=5,
-        label_visibility="collapsed",
-        help=(
-            "Camelot table extraction scans this many pages from the start "
-            "of each PDF. Higher = more thorough but slower; the deployed UI "
-            "feels frozen above ~100 pages without progress feedback. "
-            "Increase if your PDFs put critical tables late."
-        ),
-    )
-
-    st.markdown("**OCR on scanned pages**")
-    enable_vision_ocr = st.toggle(
-        "Vision OCR for low-coverage pages (Claude Sonnet 4.5)",
-        value=True,
-        help=(
-            "When a page produces fewer than 80 characters of native text "
-            "(scanned image, image-only blueprint), route it through Claude's "
-            "vision model to recover the text. Cached after first call. "
-            "Toggle off for a fully offline / no-vision run."
+            "Confidence is **extraction × (match × pairing) × authority**, "
+            "clamped to [0, 1]. A weak pairing automatically pulls overall "
+            "confidence down. Flags below the threshold stay accessible in "
+            "the **Suppressed** expander on the results page."
         ),
     )
 
@@ -197,12 +209,23 @@ with st.sidebar:
             "from public standards (IEEE C57, IEC 60076, NEMA TR 1, "
             "IEEE Std 242). Within-tolerance changes classify as `info` and "
             "are hidden by default.\n"
-            "- **Confidence** = extraction × match × authority, in [0, 1].\n"
+            "- **Confidence** = `extraction × (match × pairing) × authority`, "
+            "clamped to [0, 1]. The three sub-scores answer three different "
+            "questions: how sure about the values, how sure about the "
+            "pairing (are these the same physical record?), and how sure "
+            "about the authority direction.\n"
+            "- **Pairing confidence** is surfaced separately on each flag. "
+            "Pairs below 0.75 get a `⚠️ weak pair` badge and are collapsed "
+            "by default — verify the correspondence before treating the gap "
+            "as a fact.\n"
             "- **Authority direction** — Doc A is treated as the source-of-"
             "truth side; Doc B is the deviation candidate. Per-project "
-            "configurable authority is on the roadmap.\n"
+            "configurable authority is on the roadmap (see BACKLOG R-G).\n"
             "- **Citation** is a bounding-box snippet of the source page so "
             "you can verify the finding without alt-tabbing.\n"
+            "- **Unpaired records** (separate expander after the flag list) "
+            "are records the aligner declined to pair across documents. "
+            "Review them so silent gaps aren't mistaken for clean runs.\n"
             "- **Accept / Dismiss** records your verdict for the JSON audit "
             "export at the bottom of the page."
         )
@@ -320,8 +343,17 @@ run = bool(a_file is not None and b_file is not None and st.button("Run review",
 if run:
     _reset_workdir()
     workdir = _ensure_session_workdir()
-    a_path = workdir / "doc_a.pdf"
-    b_path = workdir / "doc_b.pdf"
+    # Preserve original uploaded filenames so the citation panel shows
+    # "spec_xfmr_001.pdf" instead of a generic "doc_a.pdf". Use Path().name
+    # to strip any directory traversal in the upload metadata. Fall back to
+    # generic names if Streamlit somehow didn't surface a usable filename.
+    a_name = Path(getattr(a_file, "name", "") or "doc_a.pdf").name or "doc_a.pdf"
+    b_name = Path(getattr(b_file, "name", "") or "doc_b.pdf").name or "doc_b.pdf"
+    # Same-name collision guard (user uploads two files called "design.pdf")
+    if a_name == b_name:
+        b_name = f"b_{b_name}"
+    a_path = workdir / a_name
+    b_path = workdir / b_name
     a_path.write_bytes(a_file.read())  # type: ignore[union-attr]
     b_path.write_bytes(b_file.read())  # type: ignore[union-attr]
 
@@ -469,12 +501,25 @@ if flags:
         s = getattr(f, "severity", "major")
         sev_counts[s] = sev_counts.get(s, 0) + 1
 
-    cols = st.columns([2, 1, 1, 1, 1])
+    unpaired_a_count = len(st.session_state.get("unpaired_a", []))
+    unpaired_b_count = len(st.session_state.get("unpaired_b", []))
+    unpaired_total = unpaired_a_count + unpaired_b_count
+
+    cols = st.columns([2, 1, 1, 1, 1, 1])
     cols[0].metric("Time", f"{elapsed:.1f} s")
     cols[1].metric("Surfaced", f"{len(above)}")
     cols[2].metric("🔴 Critical", f"{sev_counts.get('critical', 0)}")
     cols[3].metric("🟠 Major", f"{sev_counts.get('major', 0)}")
     cols[4].metric("🟡 Minor", f"{sev_counts.get('minor', 0)}")
+    cols[5].metric(
+        "📋 Unpaired",
+        f"{unpaired_total}",
+        help=(
+            f"{unpaired_a_count} records in Doc A and {unpaired_b_count} in "
+            "Doc B had no confident counterpart and were NOT compared. "
+            "Listed in the 'Unpaired records' expander below."
+        ),
+    )
 
     judge_caption = (
         "AI-judged severity + downstream effects"
@@ -483,60 +528,78 @@ if flags:
     )
     st.caption(judge_caption)
 
-    if not above and not below:
-        diag_a = st.session_state.get("diag_a", {})
-        diag_b = st.session_state.get("diag_b", {})
-        a_p = diag_a.get("params", 0)
-        b_p = diag_b.get("params", 0)
-        if a_p == 0 and b_p == 0:
-            st.warning(
-                "**No common ground between these two documents.**  \n"
-                "Neither PDF yielded engineering parameters that the system "
-                "could extract. The two files look unrelated, or they are "
-                "prose-heavy / meta-instructional documents (parameters "
-                "embedded in sentences rather than `Label: value` rows), "
-                "or both pages were scanned images."
-            )
-        elif a_p == 0 or b_p == 0:
-            empty_side = "A" if a_p == 0 else "B"
-            other = "B" if empty_side == "A" else "A"
-            st.warning(
-                f"**Only Doc {other} yielded extractable parameters.**  \n"
-                f"Doc {empty_side} produced 0 parameters; Doc {other} produced "
-                f"{max(a_p, b_p)}. Without parameters on both sides, no "
-                f"cross-document pairs can form. Doc {empty_side} is likely "
-                "prose-heavy, a meta / instructional document, or scanned."
-            )
+    diag_a = st.session_state.get("diag_a", {})
+    diag_b = st.session_state.get("diag_b", {})
+    a_p = diag_a.get("params", 0)
+    b_p = diag_b.get("params", 0)
+
+    if not above:
+        # Surface a diagnosis whenever NOTHING reached the reviewer above
+        # the suppression threshold — distinct from "nothing classified at
+        # all," which is the all-empty case.
+        if not below:
+            if a_p == 0 and b_p == 0:
+                st.warning(
+                    "**No common ground between these two documents.**  \n"
+                    "Neither PDF yielded engineering parameters that the "
+                    "system could extract. The two files look unrelated, or "
+                    "they are prose-heavy / meta-instructional documents "
+                    "(parameters embedded in sentences rather than "
+                    "`Label: value` rows), or both pages were scanned images."
+                )
+            elif a_p == 0 or b_p == 0:
+                empty_side = "A" if a_p == 0 else "B"
+                other = "B" if empty_side == "A" else "A"
+                st.warning(
+                    f"**Only Doc {other} yielded extractable parameters.**  \n"
+                    f"Doc {empty_side} produced 0 parameters; Doc {other} "
+                    f"produced {max(a_p, b_p)}. Without parameters on both "
+                    f"sides, no cross-document pairs can form. Doc "
+                    f"{empty_side} is likely prose-heavy, a meta / "
+                    "instructional document, or scanned."
+                )
+            else:
+                st.info(
+                    "**Documents extracted parameters but nothing aligned "
+                    "to a mismatch.**  \n"
+                    f"Doc A produced {a_p} parameters, Doc B produced {b_p}. "
+                    "Either the parameters named in each don't overlap, "
+                    "every overlapping value is unit-equivalent (e.g. "
+                    "`150 kVA` vs `0.15 MVA`), or every numeric difference "
+                    "falls within the configured tolerance bands."
+                )
         else:
             st.info(
-                "**Documents extracted parameters but nothing aligned to a "
-                "mismatch.**  \n"
-                f"Doc A produced {a_p} parameters, Doc B produced {b_p}. "
-                "Either the parameters named in each don't overlap, every "
-                "overlapping value is unit-equivalent (e.g. `150 kVA` vs "
-                "`0.15 MVA`), or every numeric difference falls below the "
-                "suppression threshold. Lower the threshold in the sidebar "
-                "to surface lower-confidence flags."
+                f"**All {len(below)} flag(s) sit below the {threshold:.2f} "
+                "suppression threshold.**  \n"
+                "The pipeline classified candidate mismatches but none "
+                "cleared the confidence bar. Drop the threshold slider in "
+                "the sidebar to surface them, or open the **Suppressed** "
+                "expander below."
             )
 
-        with st.expander("Diagnostic counts", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Doc A**")
-                st.caption(
-                    f"spans: {diag_a.get('spans', 0)} · "
-                    f"tables: {diag_a.get('tables', 0)} · "
-                    f"**extractable params: {a_p}** · "
-                    f"low-coverage pages: {diag_a.get('low_coverage_pages', 0)}"
-                )
-            with col2:
-                st.markdown("**Doc B**")
-                st.caption(
-                    f"spans: {diag_b.get('spans', 0)} · "
-                    f"tables: {diag_b.get('tables', 0)} · "
-                    f"**extractable params: {b_p}** · "
-                    f"low-coverage pages: {diag_b.get('low_coverage_pages', 0)}"
-                )
+    # Diagnostic panel is now always available — useful for confidence-
+    # building on successful runs too, not only on empty results.
+    with st.expander("Diagnostic counts (per-doc extraction stats)", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Doc A**")
+            st.caption(
+                f"spans: {diag_a.get('spans', 0)} · "
+                f"tables: {diag_a.get('tables', 0)} · "
+                f"**extractable params: {a_p}** · "
+                f"low-coverage pages: {diag_a.get('low_coverage_pages', 0)} · "
+                f"OCR pages: {diag_a.get('ocr_pages', 0)}"
+            )
+        with col2:
+            st.markdown("**Doc B**")
+            st.caption(
+                f"spans: {diag_b.get('spans', 0)} · "
+                f"tables: {diag_b.get('tables', 0)} · "
+                f"**extractable params: {b_p}** · "
+                f"low-coverage pages: {diag_b.get('low_coverage_pages', 0)} · "
+                f"OCR pages: {diag_b.get('ocr_pages', 0)}"
+            )
 
     for f in sorted(above, key=_flag_sort_key):
         fid = _flag_id(f)
@@ -600,7 +663,14 @@ if flags:
 
             ca, cb = st.columns(2)
             with ca:
-                doc_label = Path(f.a_record.doc_id).name or "doc_a"
+                # Prefer source_path (real filename, e.g. "spec_xfmr_001.pdf")
+                # over doc_id (logical label, e.g. "doc_a") so the reviewer
+                # sees what they uploaded, not the internal handle.
+                doc_label = (
+                    Path(f.a_record.source_path).name
+                    if f.a_record.source_path
+                    else Path(f.a_record.doc_id).name
+                ) or "doc_a"
                 ocr_note_a = (
                     " · 🔍 OCR (whole-page snippet — vision model has no per-word bbox)"
                     if _is_ocr_span(f.a_record)
@@ -620,7 +690,11 @@ if flags:
                         st.image(cit_a.snippet_png)
                 st.code(_span_excerpt(f.a_record), language="text")
             with cb:
-                doc_label = Path(f.b_record.doc_id).name or "doc_b"
+                doc_label = (
+                    Path(f.b_record.source_path).name
+                    if f.b_record.source_path
+                    else Path(f.b_record.doc_id).name
+                ) or "doc_b"
                 ocr_note_b = (
                     " · 🔍 OCR (whole-page snippet — vision model has no per-word bbox)"
                     if _is_ocr_span(f.b_record)
@@ -694,21 +768,45 @@ if flags:
                 "pairing. Review manually to confirm none represent a real "
                 "deletion or specification gap."
             )
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown(f"**Doc A — {len(unpaired_a)} unpaired**")
-                for r in sorted(unpaired_a, key=lambda x: (x.page, x.name, x.raw_value)):
-                    tag = f"`#{r.entity_tag}` " if r.entity_tag else ""
-                    st.markdown(
-                        f"- p{r.page} · {tag}**{r.name}** · `{r.raw_value}`"
+
+            def _render_unpaired_column(
+                records: list[Any],
+                doc_label_prefix: str,
+            ) -> None:
+                # Group by parameter name so a 49-row list (Option 2 Doc B)
+                # collapses into ~5 family buckets the reviewer can scan.
+                by_family: dict[str, list[Any]] = {}
+                for r in records:
+                    by_family.setdefault(r.name, []).append(r)
+                st.markdown(f"**{doc_label_prefix} — {len(records)} unpaired**")
+                if not records:
+                    st.caption("_(none)_")
+                    return
+                # Largest buckets first so reviewer sees the dominant gap.
+                for family, items in sorted(
+                    by_family.items(), key=lambda kv: (-len(kv[1]), kv[0])
+                ):
+                    label = (
+                        f"**{family}** · {len(items)} record(s)"
+                        if len(items) > 1
+                        else f"**{family}**"
                     )
-            with col_b:
-                st.markdown(f"**Doc B — {len(unpaired_b)} unpaired**")
-                for r in sorted(unpaired_b, key=lambda x: (x.page, x.name, x.raw_value)):
-                    tag = f"`#{r.entity_tag}` " if r.entity_tag else ""
-                    st.markdown(
-                        f"- p{r.page} · {tag}**{r.name}** · `{r.raw_value}`"
-                    )
+                    # Expand by default only for small buckets so the
+                    # reviewer isn't drowning in fuse rows.
+                    with st.expander(label, expanded=len(items) <= 3):
+                        for r in sorted(
+                            items, key=lambda x: (x.page, x.raw_value)
+                        ):
+                            tag = f"`#{r.entity_tag}` " if r.entity_tag else ""
+                            st.markdown(
+                                f"- p{r.page} · {tag}`{r.raw_value}`"
+                            )
+
+            up_a, up_b = st.columns(2)
+            with up_a:
+                _render_unpaired_column(unpaired_a, "Doc A")
+            with up_b:
+                _render_unpaired_column(unpaired_b, "Doc B")
 
     accepted = [
         d for d in st.session_state["decisions"].values() if d.get("verdict") == "accepted"

@@ -1,9 +1,22 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
+from interlock.cache import disk as disk_cache
 from interlock.ingest.vision_fallback import VisionResult, vision_extract_page
 
 DOC_A = Path("fixtures/pdfs/doc_a_60pct.pdf")
+
+
+@pytest.fixture(autouse=True)
+def _clear_vision_cache() -> None:
+    """Vision results are diskcache-keyed by PDF content + page; clear the
+    namespace between tests so a mocked response in test A doesn't leak
+    into test B (same fixture PDF, same page)."""
+    disk_cache.clear_namespace("vision-ocr")
+    yield
+    disk_cache.clear_namespace("vision-ocr")
 
 
 def test_vision_extract_page_returns_text_and_confidence(mocker) -> None:  # type: ignore[no-untyped-def]

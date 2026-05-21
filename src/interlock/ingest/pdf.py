@@ -9,12 +9,17 @@ uniform input stream.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import fitz
 
 from .tables import Table, extract_tables
 from .text import Span, aggregate_line_spans, extract_spans
+
+OcrProgressCallback = Callable[[int, int, int], None]  # (completed, total, page_num)
+OCR_MAX_WORKERS = 5  # cap concurrent vision API calls (Anthropic tier-aware)
 
 MIN_CHARS_PER_PAGE = 80
 
@@ -33,29 +38,53 @@ def _ocr_pages(
     doc_id: str,
     page_numbers: list[int],
     source_path: str,
+    progress_cb: OcrProgressCallback | None = None,
 ) -> tuple[list[Span], list[int]]:
-    """Vision-OCR a list of pages, return Spans + the pages that produced text.
+    """Vision-OCR a list of pages in parallel; return Spans + completed pages.
 
-    Import is deferred so callers who don't enable OCR don't need an
-    Anthropic key available. Each OCR page becomes one synthetic Span
-    occupying the full page bbox (the bbox is the page rect — the vision
-    model doesn't return word-level coordinates).
+    Vision API calls are I/O-bound so a ThreadPoolExecutor reduces the
+    wall-clock from N×latency to roughly ceil(N/workers)×latency. On a
+    9-page scanned PDF that's ~15-25s instead of ~90-180s.
+
+    ``progress_cb`` (if provided) is called once per completed page with
+    ``(completed_count, total, last_page_number)`` so a UI can render a
+    progress bar / status update. The callback runs on the main thread
+    via ``as_completed``.
     """
     from interlock.ingest.vision_fallback import vision_extract_page
 
     out_spans: list[Span] = []
     out_pages: list[int] = []
+    if not page_numbers:
+        return out_spans, out_pages
+
     doc = fitz.open(pdf_path)
     try:
-        for page_num in page_numbers:
+        page_rects = {p: doc[p - 1].rect for p in page_numbers}
+    finally:
+        doc.close()
+
+    completed = 0
+    total = len(page_numbers)
+    with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as ex:
+        future_to_page = {
+            ex.submit(vision_extract_page, pdf_path, p): p for p in page_numbers
+        }
+        for future in as_completed(future_to_page):
+            page_num = future_to_page[future]
+            completed += 1
             try:
-                result = vision_extract_page(pdf_path, page_num)
+                result = future.result()
             except Exception:  # pragma: no cover — surface as no-op
+                if progress_cb is not None:
+                    progress_cb(completed, total, page_num)
                 continue
             text = (result.text or "").strip()
             if not text:
+                if progress_cb is not None:
+                    progress_cb(completed, total, page_num)
                 continue
-            rect = doc[page_num - 1].rect
+            rect = page_rects[page_num]
             out_spans.append(
                 Span(
                     doc_id=doc_id,
@@ -66,8 +95,12 @@ def _ocr_pages(
                 )
             )
             out_pages.append(page_num)
-    finally:
-        doc.close()
+            if progress_cb is not None:
+                progress_cb(completed, total, page_num)
+
+    # Deterministic order — pages may have completed out of order in the pool.
+    out_spans.sort(key=lambda s: s.page)
+    out_pages.sort()
     return out_spans, out_pages
 
 
@@ -77,6 +110,7 @@ def ingest(
     *,
     table_max_pages: int | None = None,
     enable_vision_ocr: bool = False,
+    ocr_progress_cb: OcrProgressCallback | None = None,
 ) -> IngestResult:
     """Run PyMuPDF span + Camelot table extraction with optional vision OCR.
 
@@ -110,7 +144,9 @@ def ingest(
 
     ocr_pages: list[int] = []
     if enable_vision_ocr and low_cov:
-        ocr_spans, ocr_pages = _ocr_pages(pdf_path, did, low_cov, pdf_path)
+        ocr_spans, ocr_pages = _ocr_pages(
+            pdf_path, did, low_cov, pdf_path, progress_cb=ocr_progress_cb
+        )
         merged_spans = merged_spans + ocr_spans
 
     return IngestResult(

@@ -258,10 +258,23 @@ if run:
                 "⏳ Aligning across documents (exact name + canonical glossary + "
                 "Voyage embeddings + Pint unit normalisation)"
             )
+            ocr_bar_holder: dict[str, Any] = {}
             if enable_vision_ocr:
                 status.write(
-                    "⏳ Vision OCR on low-coverage pages (Claude Sonnet 4.5)"
+                    "⏳ Vision OCR on low-coverage pages (Claude Sonnet 4.5, parallel × 5, cached)"
                 )
+                ocr_bar_holder["bar"] = st.progress(0.0, text="OCR: waiting for first page…")
+
+            def _ocr_cb(done: int, total: int, page: int) -> None:
+                bar = ocr_bar_holder.get("bar")
+                if bar is None:
+                    return
+                ratio = done / max(total, 1)
+                bar.progress(
+                    min(ratio, 1.0),
+                    text=f"OCR: {done}/{total} pages complete (last: page {page})",
+                )
+
             status.write("⏳ Classifying severity against IEEE / IEC tolerance bands")
             if use_llm_judge:
                 status.write("⏳ Asking the LLM for engineering rationale (cached)")
@@ -273,6 +286,7 @@ if run:
                 use_llm_judge=use_llm_judge,
                 table_max_pages=table_max_pages,
                 enable_vision_ocr=enable_vision_ocr,
+                ocr_progress_cb=_ocr_cb if enable_vision_ocr else None,
             )
             status.update(
                 label=f"Review complete in {time.time() - t0:.1f}s",

@@ -11,6 +11,7 @@ Streamlit app can wire Voyage.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from interlock.align.claims import align_claims_exact
 from interlock.align.combiner import combine_alignments
@@ -24,6 +25,9 @@ from interlock.ingest.pdf import ingest
 from interlock.store import sqlite as store
 
 EmbedFn = Callable[[list[str]], dict[str, list[float]]]
+
+if TYPE_CHECKING:
+    from interlock.ingest.pdf import OcrProgressCallback
 
 
 def review_two_documents(
@@ -40,6 +44,7 @@ def review_two_documents(
     persist_claims: bool = False,
     table_max_pages: int | None = None,
     enable_vision_ocr: bool = False,
+    ocr_progress_cb: OcrProgressCallback | None = None,
 ) -> list[Flag]:
     """Run end-to-end review.
 
@@ -67,17 +72,23 @@ def review_two_documents(
     ``persist_claims=True`` writes claims and entities to the SQLite store
     for audit/triage. Off by default since the demo loop doesn't need it.
     """
+    def _cb_a(done: int, total: int, page: int) -> None:
+        if ocr_progress_cb is not None:
+            ocr_progress_cb(done, total, page)
+
     ia = ingest(
         pdf_a,
         doc_id=doc_a_id,
         table_max_pages=table_max_pages,
         enable_vision_ocr=enable_vision_ocr,
+        ocr_progress_cb=_cb_a,
     )
     ib = ingest(
         pdf_b,
         doc_id=doc_b_id,
         table_max_pages=table_max_pages,
         enable_vision_ocr=enable_vision_ocr,
+        ocr_progress_cb=_cb_a,
     )
     pa = extract_parameters(ia.spans)
     pb = extract_parameters(ib.spans)

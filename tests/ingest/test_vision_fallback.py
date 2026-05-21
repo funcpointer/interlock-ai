@@ -8,6 +8,7 @@ from interlock.ingest.vision_fallback import (
     PROMPT,
     PROMPT_VERSION,
     VisionResult,
+    _implausible_tokens,
     vision_extract_page,
 )
 
@@ -72,3 +73,103 @@ def test_vision_extract_page_robust_to_extra_prose(mocker) -> None:  # type: ign
     result = vision_extract_page(str(DOC_A), page=1)
     assert result.text == "abc"
     assert result.confidence == 0.5
+
+
+# ---------- Plausibility validator ----------
+
+
+def test_implausible_tokens_flags_decimal_slip_on_impedance() -> None:
+    """0.575%Z is the exact user-reported hallucination — must be flagged."""
+    bad = _implausible_tokens("XFMR1 0.575%Z, liquid-filled")
+    assert bad
+    assert any("0.575%Z" in s for s in bad)
+
+
+def test_implausible_tokens_passes_typical_impedance() -> None:
+    """5.75%Z is squarely typical for a distribution transformer — no flag."""
+    bad = _implausible_tokens("XFMR1 5.75%Z, liquid-filled")
+    assert bad == []
+
+
+def test_implausible_tokens_flags_grouped_digit_slip_on_fault_current() -> None:
+    """2,000,000A fault is well above the 200 kA ceiling."""
+    bad = _implausible_tokens("Fault X1 2,000,000A RMS Sym")
+    assert bad
+    assert any("2,000,000A" in s for s in bad)
+
+
+def test_implausible_tokens_handles_multiple_tokens_per_text() -> None:
+    text = "XFMR1 5.75%Z, 1000KVA, 13.8kV, Fault X1 20,000A RMS Sym, IFLA=42A"
+    assert _implausible_tokens(text) == []  # all typical
+
+
+def test_implausible_tokens_does_not_misfire_on_decimal_zero() -> None:
+    """0.15 MVA == 150 kVA — a legitimate small transformer, must pass."""
+    bad = _implausible_tokens("0.15 MVA XFMR")
+    assert bad == []
+
+
+# ---------- Re-OCR flow ----------
+
+
+def _fake_response(text: str, conf: float = 0.85) -> MagicMock:
+    """Build a Claude-shaped mock response carrying a JSON OCR payload."""
+    content = MagicMock()
+    content.text = f'{{"text":"{text}","confidence":{conf}}}'
+    return MagicMock(content=[content])
+
+
+def test_reocr_triggers_when_pass_one_implausible_and_pass_two_better(
+    mocker,  # type: ignore[no-untyped-def]
+) -> None:
+    """Pass 1 returns implausible 0.575%Z; pass 2 returns plausible 5.75%Z.
+    Final result must be pass-2 text with reocr_triggered=True."""
+    call_count = {"n": 0}
+
+    def fake_claude(image_b64, prompt=None):  # type: ignore[no-untyped-def]
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _fake_response("XFMR1 0.575%Z, liquid-filled", conf=0.6)
+        return _fake_response("XFMR1 5.75%Z, liquid-filled", conf=0.92)
+
+    mocker.patch(
+        "interlock.ingest.vision_fallback._call_claude",
+        side_effect=fake_claude,
+    )
+    result = vision_extract_page(str(DOC_A), page=1)
+    assert call_count["n"] == 2, "expected a second OCR call when pass 1 was implausible"
+    assert "5.75%Z" in result.text
+    assert result.reocr_triggered is True
+    assert result.confidence == 0.92
+
+
+def test_no_reocr_when_pass_one_is_plausible(mocker) -> None:  # type: ignore[no-untyped-def]
+    """Cheap path: no implausible token on pass 1 ⇒ no second call."""
+    spy = mocker.patch(
+        "interlock.ingest.vision_fallback._call_claude",
+        return_value=_fake_response("XFMR1 5.75%Z, liquid-filled", conf=0.9),
+    )
+    result = vision_extract_page(str(DOC_A), page=1)
+    assert spy.call_count == 1
+    assert result.reocr_triggered is False
+
+
+def test_reocr_keeps_pass_one_when_pass_two_no_better(mocker) -> None:  # type: ignore[no-untyped-def]
+    """Both passes hallucinate — keep pass 1 (no flapping). reocr_triggered
+    stays False because pass 2 wasn't preferred."""
+    call_count = {"n": 0}
+
+    def fake_claude(image_b64, prompt=None):  # type: ignore[no-untyped-def]
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _fake_response("XFMR1 0.575%Z", conf=0.5)
+        return _fake_response("XFMR1 0.0575%Z", conf=0.5)
+
+    mocker.patch(
+        "interlock.ingest.vision_fallback._call_claude",
+        side_effect=fake_claude,
+    )
+    result = vision_extract_page(str(DOC_A), page=1)
+    assert call_count["n"] == 2
+    assert "0.575%Z" in result.text
+    assert result.reocr_triggered is False

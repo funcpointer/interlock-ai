@@ -1,11 +1,12 @@
 # InterLock AI
 
-Cross-document discrepancy detection for engineering PDFs. Reviewer uploads two PDFs from the same project; the system surfaces directional, cited, **severity-tiered** parameter mismatches with optional LLM significance judgment.
+Cross-document discrepancy detection for engineering PDFs. Reviewer uploads two PDFs from the same project; the system surfaces directional, cited, **severity-tiered** parameter mismatches with **identity-aware pairing**, **pairing-confidence scoring**, an **honest unpaired-records surface**, and optional LLM significance judgment.
 
 - PRD: [`docs/PRD.md`](docs/PRD.md) — reviewer persona, wedge, 5-layer platform path
-- TDD: [`docs/TDD.md`](docs/TDD.md) — architecture, tolerance bands, evaluation
+- TDD: [`docs/TDD.md`](docs/TDD.md) — architecture, tolerance bands, evaluation, known limits
 - Architecture diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — control flow, data flow, cache hierarchy
-- Authorship: [`docs/AUTHORSHIP.md`](docs/AUTHORSHIP.md) — what's built / reused / disclosed
+- Authorship: [`docs/AUTHORSHIP.md`](docs/AUTHORSHIP.md) — what's built / reused / disclosed, per-phase
+- Demo script: [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) — 3-minute walkthrough
 - Locked scope + fixtures: [`docs/SCOPE.md`](docs/SCOPE.md), [`docs/FIXTURES.md`](docs/FIXTURES.md)
 - Risk register: [`docs/RISK_REGISTER.md`](docs/RISK_REGISTER.md)
 - Backlog (out-of-scope): [`docs/BACKLOG.md`](docs/BACKLOG.md)
@@ -14,7 +15,7 @@ Cross-document discrepancy detection for engineering PDFs. Reviewer uploads two 
 
 ```bash
 uv sync
-uv run pytest
+uv run pytest --deselect tests/real_world   # 261 tests, ~1:30 wall-clock
 uv run streamlit run src/interlock/ui/app.py
 ```
 
@@ -24,8 +25,8 @@ uv run streamlit run src/interlock/ui/app.py
 - [uv](https://github.com/astral-sh/uv)
 - Ghostscript (Camelot dependency): `brew install ghostscript`
 - `.env` populated from `.env.example`:
-  - `VOYAGE_API_KEY` — required (semantic alignment)
-  - `ANTHROPIC_API_KEY` — required (vision fallback path; not exercised by default fixtures)
+  - `VOYAGE_API_KEY` — required (semantic alignment + canonical glossary)
+  - `ANTHROPIC_API_KEY` — required for the vision-OCR fallback (any scanned-PDF page) and the opt-in LLM significance judge
 
 ## Demo
 
@@ -36,14 +37,25 @@ Two fixture pairs ship with the repo.
 - `doc_a_60pct.pdf` — Doc A (authoritative, real Eaton sample coordination study)
 - `doc_b_90pct.pdf` — Doc B (downstream, derived from Doc A with 6 documented mutations — see `fixtures/mutations/MUTATIONS.md`)
 
-Cross-document mode **off**. Expected: 4 flags grouped under **critical** severity (TP-1 impedance, TP-2 fault current, TP-3 transformer rating × 2 sites — all decimal-shift class). Zero false positives. FP-1 unit-equivalent trap (`150 kVA` vs `0.15 MVA`) suppressed by Pint normalization. **Info-tier within-tolerance changes** are suppressed by default (toggle the threshold slider to surface them).
+Expected: **4 flags** all grouped under **critical** severity — all decimal-shift class (`%Z 5.75 → 0.575`, `Fault Current 20,000 → 200,000 A`, `Transformer Rating 1000 → 100 kVA` × 2 sites). Zero false positives. FP-1 unit-equivalent trap (`150 kVA` vs `0.15 MVA`) suppressed by Pint normalisation. Info-tier within-tolerance changes suppressed by default (drop the confidence threshold slider to surface them).
 
 ### Option 2 — cross-document (equipment spec ↔ coordination study)
 
 - `spec_xfmr_001.pdf` — Doc A (authoritative, synthetic transformer Equipment Data Sheet; see `docs/AUTHORSHIP.md` for disclosure)
 - `doc_a_60pct.pdf` — Doc B (downstream, the same Eaton study reused)
 
-Cross-document mode **on**. Expected: 3 flags surfaced via semantic alignment + canonical glossary — Rated Power ↔ Transformer Rating (minor), Rated Impedance ↔ %Z (major, 22 % deviation), Primary Voltage ↔ System Voltage (major). Zero exact-name matches in this pair; the semantic path + IEEE C57.12.00-cited tolerance bands carry the entire signal. Toggle **Use LLM significance judge** in the UI sidebar to enrich each flag with engineering rationale + downstream-effect propagation (Anthropic Opus 4.7, prompt-cached).
+Expected: **3 flags** surfaced via semantic alignment + canonical glossary:
+- `Rated Power 1100 kVA ↔ Transformer Rating 1000 kVA` (minor, 9 % deviation)
+- `Primary Voltage 12.47 kV ↔ System Voltage 13.8 kV` (major, 10.7 % deviation, pairing confidence 0.90)
+- `Rated Impedance 4.5 % ↔ %Z 5.75 %` (major, 28 % deviation)
+
+Plus **4 unpaired records on the spec side** (Secondary Voltage, Frequency, BIL, Insulation Class — no counterpart in the study) and **49 unpaired records on the study side** (fuse designations + duplicate transformer references — no counterpart in the spec) surfaced in the "📋 Unpaired records" expander for honest gap reporting. Toggle **Use LLM significance judge** in the sidebar to enrich each flag with engineering rationale + downstream-effect propagation (Anthropic Opus 4.7, prompt-cached).
+
+### Option 3 — scanned PDF (vision OCR + plausibility re-OCR)
+
+- `doc_a_scanned.pdf` — JPEG-encoded raster of `doc_a_60pct.pdf` (every page image-only, zero native text)
+
+Enable **Vision OCR** in the sidebar; ingestion routes every low-coverage page through Claude Sonnet 4.5 at 300 DPI with a verification re-OCR pass at 400 DPI when a numeric value falls outside its family's plausibility range. Per-page progress bar in the UI. Pair against `doc_b_90pct.pdf` (or any other doc) for a full review on extracted text. Recovers 54 parameters vs 52 from the native baseline (104 % yield).
 
 A/B comparison verifies Option 2 demonstrates a capability Option 1 cannot:
 
@@ -71,19 +83,32 @@ Gold set: `fixtures/eval/gold.yaml`. Acceptance thresholds locked in `docs/FIXTU
 
 `packages.txt` declares `ghostscript` so Camelot's lattice parser works on the cloud runner.
 
+## Access notes
+
+| Asset | Where | How a reviewer accesses it |
+|---|---|---|
+| Source code | https://github.com/funcpointer/interlock-ai | Public read. Phase tags + `v1.*` checkpoints provide point-in-time snapshots. |
+| Deployed prototype | Streamlit Cloud URL (add when live) | Public read. Cold start ~30 s on first visit (free tier). |
+| Demo video | (URL added after recording) | Public read. |
+| Fixture PDFs | `fixtures/pdfs/` in the repo | Tracked in git. Real Eaton document is a public sample; synthetic fixtures disclosed in `docs/AUTHORSHIP.md`. |
+| Evaluation gold sets | `fixtures/eval/gold*.yaml` | Tracked in git. Acceptance thresholds in `docs/FIXTURES.md` §6. |
+| API keys | Not in the repo (gitignored `.env`) | Reviewer brings their own `VOYAGE_API_KEY` and `ANTHROPIC_API_KEY` for local runs; the deployed Streamlit Cloud instance has them configured server-side. |
+| Internal session transcripts / planning notes | `docs/superpowers/`, `CLAUDE.md` | Gitignored. Not part of the submission. |
+
 ## Phase tags
 
 The repo's history is partitioned into TDD phases; each phase ends in a verifiable checkpoint tag.
 
 ```
-phase-0-scaffold    phase-3-extract     phase-6-citation    phase-9-deploy
-phase-1-fixtures    phase-4-align       phase-7-ui          phase-11-cross-doc
-phase-2-ingest      phase-5-detect      phase-8-eval        phase-12-real-world
+phase-0-scaffold              phase-3-extract               phase-6-citation
+phase-1-fixtures              phase-4-align                 phase-7-ui
+phase-2-ingest                phase-5-detect                phase-8-eval
+phase-9-deploy                phase-11-cross-doc            phase-12-real-world
+phase-13-tolerance            phase-14-entity-claim         phase-17-deliverables
+phase-18-ux-ocr               phase-19-identity-alignment   phase-20-ocr-quality
 
-phase-13-tolerance       v1.3-tolerance
-phase-14-entity-claim    v1.4-entity-claim
-
-v1.0-mvp · v1.1-cross-doc · v1.2-real-world · v1.3-tolerance · v1.4-entity-claim
+v1.0-mvp · v1.1-cross-doc · v1.2-real-world · v1.3-tolerance ·
+v1.4-entity-claim · v1.5-mvp-ready
 ```
 
-**Test surface (v1.4):** 294 passing, 7 slow-marked deselected, mypy strict clean, ruff clean. Cost-per-demo-run < $0.10 with diskcache + Anthropic 1-hour prompt caching on ontology blocks.
+**Test surface (v1.5-mvp-ready):** 261 passing (default), 83 slow-marked + live-API deselected, mypy strict clean, ruff clean. Cost per demo run < $0.10 with diskcache + Anthropic 1-hour prompt caching on ontology blocks. OCR-enabled run on a 9-page scanned fixture: ~$0.45 cold, ~$0 warm.

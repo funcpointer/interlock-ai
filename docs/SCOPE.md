@@ -63,7 +63,7 @@ These items have been considered and rejected for MVP. They are platform-path it
 9. Real-time collaboration or multi-user concurrency.
 10. Audit log persistence beyond a session-scoped JSON export.
 11. Grammar, spelling, formatting, style, or stylistic-only flags. See `CLAUDE.md` framing guardrails.
-12. OCR pipeline tuning beyond invoking the chosen vision model. No tesseract integration.
+12. Tesseract / PaddleOCR / Surya integration. Multi-engine consensus voting. (Tuning of the Claude-vision path itself — DPI, prompt-engineering, plausibility validation, per-line span splitting — is allowed and shipped in Phase 18 / 20.)
 13. Custom training, fine-tuning, or model evaluation beyond the locked gold-set harness.
 14. Mobile or tablet UI.
 15. Internationalization, RTL, non-English text.
@@ -109,7 +109,7 @@ The MVP is complete when all of the following are true. Each is independently ch
 - Pint for unit normalization
 - Anthropic Python SDK with:
   - `claude-opus-4-7` for the opt-in LLM significance judge (Phase 13 addition; default `messages.parse` via the wrapper at `src/interlock/llm/client.py`)
-  - `claude-sonnet-4-5` for the vision fallback (`src/interlock/ingest/vision_fallback.py`; not exercised by default fixtures)
+  - `claude-sonnet-4-5` for the vision fallback (`src/interlock/ingest/vision_fallback.py`; exercised whenever an uploaded page has under 80 chars of native text and `enable_vision_ocr=True`; ships with per-line span splitting and two-pass plausibility re-OCR — Phase 18 / 20)
 - Voyage AI `voyage-3` for semantic name embeddings (OpenAI fallback dropped in Phase 13 amendments — single embedding provider)
 - diskcache (Phase 13) — content-hash keyed disk cache for LLM judge results and Voyage embedding vectors
 - SQLite via stdlib `sqlite3` (Phase 13–14) — `cost_event` ledger plus opt-in `entity` / `claim` / `decision` tables
@@ -164,3 +164,6 @@ This document is reopened only when a success criterion in section 6 cannot be m
 - 2026-05-19: Initial lock.
 - 2026-05-21: Phase 13 additions — severity tiers + tolerance bands (§4 augmented with engineering-meaningful classification on top of confidence). LLM significance judge added as opt-in (`use_llm_judge=True`); not on the default path. diskcache + SQLite cost ledger added (§5 item 10 / §8 affected). Anti-scope item 5 ("persistent storage of past review sessions") tightened: `cost_event` rows are persisted across runs but no per-session review state is restored on next launch; the SQLite store ships infrastructure for future review-session persistence but the v1.5 UI does not write `decision` rows yet (accepted-flag JSON export remains the audit trail).
 - 2026-05-21: Phase 14 additions — Entity + Claim layer shipped as additive (opt-in via `use_claim_layer=True`); SQLite `entity` / `claim` / `decision` tables exist with CRUD via `src/interlock/store/sqlite.py`. The runtime pipeline writes to them only when `persist_claims=True` is passed explicitly. Anti-scope item 5 tightened as above.
+- 2026-05-22: Phase 18 additions — UX cleanup + OCR support. Vision OCR is now actively exercised whenever a low-coverage page is detected (≥ 1 page under 80 native chars) and `enable_vision_ocr=True` is passed (UI exposes this as a sidebar toggle, default on). Parallel × 5 ThreadPool for vision calls. OCR text now split per visual line into one Span per row. Per-page progress bar surfaced in the UI via stage callback. Vision results disk-cached (namespace `vision-ocr`, keyed on content-hash + page + model + prompt_version + DPI).
+- 2026-05-22: Phase 19 additions — Identity-first alignment. `ParameterRecord.entity_tag` first-class field reading leading Device IDs (`⑥`, `21`, `T-200`) at extraction time. `align_exact` requires entity_tag agreement before any positional rule fires; defense-in-depth ambiguity gates (family prefix, count mismatch, OCR y-degeneracy) for untagged records. `pairing_confidence` per pairing rule, folded into overall confidence; UI surfaces a `⚠️ weak pair` badge for pairs below 0.75. `ReviewResult` dataclass + `review_two_documents_full()` return value exposes `unpaired_a` / `unpaired_b` lists; UI surfaces them in a dedicated "📋 Unpaired records" expander. Anti-scope unchanged.
+- 2026-05-22: Phase 20 additions — OCR quality refresh. Vision DPI bumped 200 → 300 (cache key includes DPI so old entries recompute automatically). Two-pass plausibility loop: after the first OCR call, scan text for engineering tokens and validate against per-family sanity bands; re-OCR at 400 DPI with a verification prompt only when an implausible value is detected. `VisionResult.reocr_triggered` field for telemetry. Anti-scope item 12 amended: tuning the Claude-vision path is allowed; multi-engine OCR (Tesseract / PaddleOCR / Surya) remains out of scope.

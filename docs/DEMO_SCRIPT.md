@@ -1,94 +1,129 @@
 # InterLock AI MVP — Demo Script
 
-Target length: **2 minutes** (hard cap 5 per brief). Plain screen recording, voice-over.
+Target length: **3 minutes** (hard cap 5 per brief). Plain screen recording, voice-over.
+
+The script below is structured as **three short segments** the reviewer can mix-and-match: revision-diff (Option 1), cross-document (Option 2), and scanned-PDF OCR. A 2-minute video covers Option 1 only; a 4-minute video covers all three.
 
 ---
 
-## 0:00–0:15 — Frame the problem
+## Segment A — Revision-diff (Option 1) · 0:00–1:30
 
-> "Engineering teams at companies like AES review hundreds of cross-referenced documents on every project. A misplaced decimal in a transformer spec almost cost them a multi-million-dollar loss — caught only because a senior engineer happened to spot it during a 60% review. InterLock AI is a review assistant that catches that kind of cross-document discrepancy automatically, with citations."
+### 0:00–0:15 — Frame the problem
 
-Visual: the README diagram or just the InterLock title page.
+> "Engineering teams at companies like AES review hundreds of cross-referenced documents on every project. A misplaced decimal in a transformer spec almost cost them a multi-million-dollar loss — caught only because a senior engineer happened to spot it during a 60% review. InterLock AI is a review assistant that catches that kind of cross-document discrepancy automatically, with citations and honest confidence."
 
-## 0:15–0:30 — Show the upload
+Visual: README title block.
+
+### 0:15–0:30 — Upload
 
 > "Reviewer uploads two PDFs from the same project. Doc A is the 60% baseline coordination study. Doc B is the 90% revision under review."
 
-Action: drop both PDFs into the Streamlit page. Click **Run review**.
+Action: drag `doc_a_60pct.pdf` and `doc_b_90pct.pdf` onto the Streamlit page. Click **Run review**.
 
-## 0:30–0:55 — Show the flag list, severity-grouped
+Visual: the live `st.status` block — each pipeline stage (Ingesting Doc A → Ingesting Doc B → Extracting parameters → Aligning → Detecting → optional LLM judge) ticks ⏸️ → ⏳ → ✅ in real time with per-stage elapsed.
 
-> "InterLock surfaces four directional flags. All four group under **critical** severity — decimal-shift class deviations exceed the IEEE C57.12.00 tolerance bands by an order of magnitude."
+> "The status panel shows each pipeline stage live, not a frozen checklist. Total wall-clock around 30 seconds on a cold cache."
 
-Visual: the flag list, grouped by severity icon. Point at:
-- TP-1: `%Z: 5.75 % (authoritative, p3) ≠ 0.575 % (deviation, p3)` — the canonical AES decimal-shift example. Severity tag: **CRITICAL**.
-- TP-2: `Fault Current: 20,000 A (authoritative, p2) ≠ 200,000 A (deviation, p2)`. **CRITICAL**.
-- TP-3 (×2): `Transformer Rating: 1000 kVA ≠ 100 kVA`. **CRITICAL**.
+### 0:30–0:55 — Flag list
 
-> "Every flag declares which document is authoritative and which is deviating. Severity tier is computed from relative deviation against per-attribute tolerance bands sourced from IEEE C57.12.00, IEC 60076-1, and NEMA TR 1. Within-tolerance changes — say a 5.75 % impedance drifting to 5.77 % — would classify as **info** and be suppressed by default. That's the noise reduction that keeps reviewer trust."
+> "Four critical flags surface, all decimal-shift class — the canonical AES failure mode. Each flag declares which document is authoritative and which is the deviation candidate."
 
-## 0:50–1:15 — Click into a citation
+Visual: the flag list, severity-grouped with red 🔴 chips.
+
+Read out:
+- `%Z: 5.75 % → 0.575 %` — decimal slip on transformer impedance
+- `Fault Current: 20,000 A → 200,000 A` — order-of-magnitude grouped-digit slip
+- `Transformer Rating: 1000 kVA → 100 kVA` (two instances on different pages)
+
+> "Severity comes from per-attribute tolerance bands sourced from IEEE C57.12.00, IEC 60076-1, and NEMA TR 1 — every band cites its source. A 5.75% impedance drifting to 5.77% would classify as `info` and be suppressed by default; that's the noise reduction that keeps reviewer trust."
+
+### 0:55–1:15 — Click into a citation
 
 Action: expand the impedance flag.
 
-> "Both sides show a bbox-highlighted snippet of the source page. The reviewer can verify the finding in seconds without leaving InterLock."
+> "Both sides show a bounding-box-highlighted snippet of the source page. The reviewer verifies in seconds without leaving InterLock. Below each snippet, the exact text excerpt for that record."
 
-Visual: both snippet PNGs side by side, red boxes on the spans.
+Visual: side-by-side snippet PNGs, red boxes on the spans, text excerpts below.
 
-## 1:15–1:30 — Accept and dismiss
+> "Notice the caption: `pairing confidence 1.00`. The system tracks not just how sure it is about the values, but how sure it is the two records describe the same thing. Weak pairings get a `⚠️ weak pair` badge and are collapsed by default — the reviewer is told when to verify the correspondence itself."
 
-Action: click Accept on TP-1, Dismiss on one of the TP-3 duplicates.
+### 1:15–1:30 — Accept, dismiss, export
+
+Action: Accept on the impedance flag. Dismiss one of the transformer-rating duplicates.
 
 > "Reviewer triages. Accepted flags export as JSON for the audit log."
 
-Action: click **Export accepted flags**. Show the file.
+Action: click **Export accepted flags**. Show the file briefly.
 
-## 1:30–1:50 — Show what didn't flag
-
-Action: scroll to the "suppressed" expander.
-
-> "Two false-positive traps were deliberately planted. 150 kVA vs 0.15 MVA — same physical value, different unit — Pint normalizes them. A heading rephrase with no parameter change — never enters the flag list at all. Zero false positives on the locked gold set."
-
-## 1:50–2:00 — Wedge to platform
-
-> "Today: cross-document parameter mismatch detection with **tolerance-aware severity tiers** and an **Entity + Claim layer** persisted in SQLite. Next: per-project tolerance ontology UI, revision lineage, coupled-effect graph traversal — when a transformer impedance changes, the system flags every downstream claim that depended on it. The wedge is the AES decimal-error problem. The platform is the engineering consistency operating system."
-
-End on the README's "Phase tags" block — 12 phase tags, 294 tests, TDD throughout, audit-traceable engineering.
-
-Optional 5-second LLM judge segment (skip if recording over budget):
-
-> "Toggle 'Use LLM significance judge'. Each flag gets an engineering rationale plus downstream-effect propagation, computed by Claude Opus 4.7 with prompt-cached ontology. Cached, so the second run costs effectively zero."
+Visual: glance at the JSON record (severity, deviation_pct, citation tuple).
 
 ---
 
-## Optional second segment — cross-doc demo (Option 2)
-
-If video budget allows another 60 seconds, follow Option 1 with the cross-doc fixture to demonstrate the semantic-alignment path:
+## Segment B — Cross-document (Option 2) · 1:30–2:30 (optional)
 
 > "Same pipeline, different fixture. Now Doc A is an equipment data sheet — a transformer nameplate spec. Doc B is the coordination study. Different document types, different layouts, different parameter naming."
 
-Action: toggle **Cross-document mode** in the UI. Upload `spec_xfmr_001.pdf` and `doc_a_60pct.pdf`.
+Action: clear, upload `spec_xfmr_001.pdf` and `doc_a_60pct.pdf`. Click **Run review**.
 
-> "Three flags surface. The spec says `Rated Power: 1100 kVA`; the study references `1000 kVA`. The spec says `Rated Impedance: 5.7 %`; the study references `5.75 %Z`. InterLock's canonical glossary maps `%Z` to impedance, `Rated Power` to transformer rating, and the embedding alignment carries the rest. Adobe Acrobat can't do this. This is the cross-document wedge."
+> "Three real engineering discrepancies surface."
 
-Show the A/B JSON briefly:
+Visual: flag list.
 
-```
-uv run python scripts/run_ab.py
-```
+- `Rated Power: 1100 kVA → 1000 kVA` — minor (9% deviation, within IEEE C57 ±10% manufacturing tolerance bracket but worth surfacing)
+- `Primary Voltage: 12.47 kV → 13.8 kV` — major (10.7% deviation; pairing confidence 0.90 because it's a semantic match `Primary Voltage` ↔ `System Voltage`)
+- `Rated Impedance: 4.5 % → 5.75 %` — major (28% deviation; the coordination is computed against the wrong impedance — protection tuning will be off)
 
-> "A/B comparison: Option 1 surfaces flags via layout-anchored exact matching. Option 2 surfaces flags via semantic alignment. Both correct, both cited, both directional."
+> "The canonical engineering glossary maps `%Z`, `Rated Impedance`, `Per Unit Impedance` to the same concept before values are compared. Adobe Acrobat's textual diff can't do this. Voyage embeddings + the glossary carry the cross-document wedge."
+
+Action: scroll to the **📋 Unpaired records** expander.
+
+> "The system is honest about what it didn't compare. The spec mentions Secondary Voltage 480 V, Frequency 60 Hz, BIL 95 kV, and Insulation Class 55°C — the coordination study doesn't restate any of those, so they're surfaced as unpaired for the reviewer to verify separately. Silent gaps would look like clean runs; explicit gaps trigger manual review."
+
+---
+
+## Segment C — Scanned-PDF OCR · 2:30–3:30 (optional, demonstrates rubric depth)
+
+> "What if a document only exists as a scanned image? The locked fixture `doc_a_scanned.pdf` is a JPEG-encoded raster of the same coordination study — zero native text."
+
+Action: toggle **Enable vision OCR** in the sidebar. Upload `doc_a_scanned.pdf` paired with `doc_a_60pct.pdf` (or another revision).
+
+Visual: the live OCR progress bar — `OCR: 4/9 pages complete (last: page 6)` ticking up as parallel API calls (5-worker pool) complete.
+
+> "Vision OCR routes only the low-coverage pages — pages with under 80 characters of native text. Claude Sonnet 4.5 transcribes each at 300 DPI. The output is split per-line so downstream snippet excerpts read cleanly. A two-pass plausibility loop catches numeric hallucinations: if any extracted engineering value falls outside its family's plausibility range, the page is re-OCR'd at 400 DPI with a verification prompt. Only the suspect pages pay the extra cost."
+
+> "All 9 pages re-rendered to text, 54 parameters recovered against 52 from the native baseline — 104% yield. Cached, so re-runs are free."
+
+Action: scroll to a flag with `🔍 OCR (whole-page snippet)` caption.
+
+> "OCR-derived flags are marked because vision models lack per-line bounding boxes; the snippet image shows the whole page rather than the exact line. The text excerpt below the image scopes down to the relevant row."
+
+---
+
+## Optional 10-second LLM judge segment
+
+Use only if the recording has budget after the three segments.
+
+Action: toggle **Use LLM significance judge** in the sidebar. Re-run.
+
+> "Each flag gets an engineering rationale plus downstream-effect propagation, computed by Claude Opus 4.7 with prompt-cached ontology. Disk-cached per flag, so the second run costs effectively zero."
+
+Visual: expand one flag, point at the LLM-generated rationale paragraph.
 
 ---
 
 ## Pre-recording checklist
 
-- [ ] `.env` has both `VOYAGE_API_KEY` and `ANTHROPIC_API_KEY` populated.
+- [ ] `.env` populated: `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`.
 - [ ] `uv run streamlit run src/interlock/ui/app.py` opens without errors.
-- [ ] Both `fixtures/pdfs/doc_a_60pct.pdf` and `fixtures/pdfs/doc_b_90pct.pdf` accessible from the desktop for the upload drag-drop.
+- [ ] All four demo PDFs accessible from the desktop:
+  - `fixtures/pdfs/doc_a_60pct.pdf`
+  - `fixtures/pdfs/doc_b_90pct.pdf`
+  - `fixtures/pdfs/spec_xfmr_001.pdf`
+  - `fixtures/pdfs/doc_a_scanned.pdf` (only if doing Segment C)
 - [ ] Browser zoom set so the flag list is visible without scrolling on a 1080p screen.
 - [ ] Mic test, audio level checked.
-- [ ] One dry-run end-to-end before recording.
+- [ ] One dry-run end-to-end before recording (Segment A at minimum).
+- [ ] Vision-OCR cache pre-warmed (run once before recording so the progress bar fills predictably).
 
 ## Recording URL
 

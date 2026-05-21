@@ -18,12 +18,12 @@ Adversarial review of the Phase 13–17 plan against the existing baseline, with
 - **Risk:** Phase 14 `Entity` + `Claim` types break existing tests that construct `ParameterRecord` by hand.
 - **Likelihood (planned):** High if rewrite-style, Low if additive.
 - **Mitigation:** Additive layer — `Claim` wraps `ParameterRecord` (back-pointer preserves citation). Aligner uses `Claim` only when `use_claim_layer=True` (default off). Existing record-based path unchanged.
-- **Outcome — mitigated.** Phase 14 landed with 43 new tests and zero existing-test regressions. v1.4 has 294 passing, 7 deselected. v1.3 baseline preserved bit-for-bit when claim layer is off.
+- **Outcome — mitigated.** Phase 14 landed with 43 new tests and zero existing-test regressions. Subsequent Phase 18 / 19 / 20 work preserved the same invariant. **Current test surface (v1.5-mvp-ready):** 261 passed, 83 deselected (slow + real-world live-API), mypy strict clean, ruff clean. v1.3 baseline preserved bit-for-bit when claim layer is off.
 
 ## R-3 — LLM extraction returns inconsistent shapes
 
 - **Risk:** Pydantic `messages.parse` extracting Claim[] from prose may drift across runs.
-- **Outcome — dropped (LLM extraction never built in v1.5).** Decision: only the **LLM significance judge** uses Pydantic-validated `messages.parse`, on a per-flag basis with disk-cached results. Extraction stays deterministic regex. LLM-assisted extraction is platform path (BACKLOG Phase 14b and prose-extraction limitation).
+- **Outcome — dropped (LLM extraction never built in v1.5).** Decision: only the **LLM significance judge** uses Pydantic-validated `messages.parse`, on a per-flag basis with disk-cached results. Extraction stays deterministic regex. LLM-assisted extraction is platform path (BACKLOG R-M prose extraction).
 
 ## R-4 — Tolerance bands aren't authoritative
 
@@ -57,7 +57,7 @@ Adversarial review of the Phase 13–17 plan against the existing baseline, with
 ## R-9 — PRD/TDD page bloat
 
 - **Risk:** Brief says 1–2 pages each. Reviewer fatigue if longer.
-- **Outcome — pending verification.** Current line counts: PRD 64 lines, TDD ~165 lines. Render-and-count check still needed; if rendered TDD exceeds 2 pages, move §4B / §6 / §7 detail to ARCHITECTURE.md.
+- **Outcome — accepted, partially mitigated.** PRD 96 lines / TDD ~175 lines as of P21 manicure. PRD sits cleanly within 1–2 pages rendered. TDD intentionally exceeds the strict 2-page bar because § "Known limits" carries the honest-scope disclosure (Phase 19) that reviewers explicitly value over brevity. Architectural detail (diagrams, schema, operational metrics) is in ARCHITECTURE.md to keep TDD focused on decisions.
 
 ## R-10 — Synthetic Doc A credibility hit (Option 2)
 
@@ -67,7 +67,7 @@ Adversarial review of the Phase 13–17 plan against the existing baseline, with
 ## R-11 — Multi-equipment fixture demo
 
 - **Risk:** Synthetic 3-equipment spec paired against implicit-entity Eaton study would over-flag because Eaton's implicit transformer matches any of XFMR-001/002 by tag.
-- **Outcome — realized, Phase 16 dropped.** Discovered at Phase 16 build time: when one side has explicit equipment tags and the other has only implicit entities, the same-entity filter treats implicit as a wildcard (so Option 1 still works) but cannot distinguish which explicit entity the implicit side refers to. Resolution requires attribute-fingerprint entity binding (voltage class, power rating). That's a meaningful Phase-14b workstream rather than a 3-hour task. Phase 16 fixture and gold set were not shipped. v1.5 ships Option 1 + Option 2 only. Phase 14b is now in BACKLOG as the highest-leverage next item.
+- **Outcome — realized, Phase 16 dropped.** Discovered at Phase 16 build time: when one side has explicit equipment tags and the other has only implicit entities, the same-entity filter treats implicit as a wildcard (so Option 1 still works) but cannot distinguish which explicit entity the implicit side refers to. Resolution requires attribute-fingerprint entity binding (voltage class, power rating). Meaningful workstream rather than a 3-hour task. Phase 16 fixture and gold set were not shipped. v1.5 ships Option 1 + Option 2 only. Entity fingerprinting now tracked as `docs/BACKLOG.md` R-F.
 
 ## R-12 — Voyage embedding non-determinism
 
@@ -84,6 +84,20 @@ Adversarial review of the Phase 13–17 plan against the existing baseline, with
 - **Risk:** Long sessions, high stakes, sleep deprivation. Decision quality drops; mistakes compound.
 - **Outcome — pending self-monitoring.** Phase ordering by ROI per hour (Phase 13 first) kept session lengths manageable. v1.5-mvp-ready ships well before EOD May 22; demo recording can wait if needed without slipping the deadline.
 
+## R-15 — Multi-instance same-name false flags (realised in user testing)
+
+- **Risk:** Pages with multiple `Fuse Designation` or `Transformer Rating` records (5+ fuses on a one-line diagram, 2–3 transformers per page) had no record identity beyond `name + page + y-coord`. Under OCR the y-coords collapse to whole-page bbox, and positional pairing degenerates to first-in-iteration order — cross-pairing `KRP-C-1600SP` (main bus fuse) against `LPS-RK-100SP` (motor branch fuse) and surfacing a fake 16:1 ampacity flag.
+- **Likelihood (realised):** confirmed in user testing of OCR-vs-native fixture pair.
+- **Outcome — mitigated, Phase 19.** Four-commit refactor: (1) `entity_tag` first-class field reading leading row markers; (2) honest unpaired-records surface in UI; (3) `pairing_confidence` per rule with `⚠️ weak pair` badge below 0.75; (4) OCR prompt v3 explicitly preserves Device IDs. Defense-in-depth ambiguity gates (family prefix, count mismatch, y-degeneracy) catch records without entity tags. Live verification on Option 2 surfaces exactly the 3 real engineering discrepancies a senior reviewer would flag; cross-doc validation confirms direction, severity, citations all correct.
+- **Honest scope statement** in `docs/TDD.md` § "Known limits": the architecture generalises but the specific regexes are shaped to fuse-coordination tables; HVAC schedules / P&IDs / right-column-ID specs are untested.
+
+## R-16 — OCR decimal-place hallucination (realised in user testing)
+
+- **Risk:** Claude vision at 200 DPI hallucinated `5.75%Z` as `0.575%Z` on the scanned fixture — a decimal-place misread that downstream alignment then surfaced as a false flag.
+- **Likelihood (realised):** confirmed in user testing.
+- **Outcome — mitigated, Phase 20.** DPI bump 200 → 300 (~$0.10 vs ~$0.05 per OCR'd page) resolved the user-reported case on first pass. Two-pass plausibility loop ships as defense-in-depth: scan first-pass text for engineering tokens, validate against per-family sanity bands (wide enough to allow unusual-but-real values), re-OCR at 400 DPI with verification prompt only when an implausible value is detected. Pass with fewer implausible tokens wins; tie keeps pass 1. Live verification: re-OCR did not fire on any of 9 pages on the locked fixture; impedance set matches native almost exactly.
+- **Honest scope statement:** both passes use the same model — multi-model consensus would catch model-specific failure modes but expands scope mid-submission. Tracked as R-D in `docs/BACKLOG.md`.
+
 ---
 
 ## Abort gates (planned vs realised)
@@ -97,21 +111,23 @@ Adversarial review of the Phase 13–17 plan against the existing baseline, with
 
 ## Pre-submission checklist
 
-- [ ] All branches merged to `main`, no stale phase branches (currently on `phase-17-deliverables` mid-review; will merge after this audit closes)
-- [ ] All tags pushed (last pushed: `v1.5-mvp-ready`)
-- [ ] `uv run pytest` green (last measured: 294 passed, 7 deselected)
-- [ ] `uv run pytest -m slow` green (or documented skip)
+- [ ] All branches merged to `main`, no stale phase branches
+- [ ] All tags pushed: last is `v1.5-mvp-ready`; phase tags through `phase-20-ocr-quality`
+- [ ] `uv run pytest --deselect tests/real_world` green — 261 passed, 83 deselected
+- [ ] `uv run pytest -m slow` green (or documented skip; live-API costs ~$0.05–0.10 per run)
 - [ ] `uv run ruff check .` clean
 - [ ] `uv run mypy src` clean
 - [ ] Streamlit Cloud URL responsive (cold start tested)
 - [ ] Demo video < 5 min, uploaded, link added to README + DEMO_SCRIPT.md
-- [ ] PRD rendered length checked (≤ 2 pages)
-- [ ] TDD rendered length checked (≤ 2 pages)
-- [ ] AUTHORSHIP.md current (Phase 13 + Phase 14 sections present)
+- [ ] PRD rendered length checked (≤ 2 pages — currently 96 lines)
+- [ ] TDD rendered length checked (intentionally exceeds 2 pages due to honest-limits disclosure, see R-9)
+- [ ] AUTHORSHIP.md current (per-phase sections present: P11 → P12 → P13 → P14 → P18 → P19 → P20)
 - [ ] `git ls-files` audited for accidental private content
-- [ ] `git grep` for `sk-ant-`, `pa-`, `vlt-` returns nothing in tracked files
+- [ ] `git grep -E "sk-ant-|pa-bu[a-zA-Z0-9]|vlt_"` returns nothing in tracked files
 - [ ] `eval/results/baseline.json` regenerated and committed
 - [ ] `eval/results/ab_comparison.json` regenerated and committed
 - [ ] README has deploy URL and demo video link
 - [ ] GitHub repo description set; topics tagged
 - [ ] Reviewer access notes in submission packet
+- [ ] **Rotate** the Voyage API key pasted in chat early in development (still active in `.env`; was visible in chat transcripts that may have been logged)
+- [ ] **Rotate** the Anthropic API key once accidentally hexdumped to chat in early development

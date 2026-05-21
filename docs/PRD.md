@@ -28,8 +28,11 @@ A typical session: open InterLock, drop two PDFs, run review, triage the severit
 |---|---|
 | Cross-document | Flags surface only when two PDFs disagree on the same parameter — never on stylistic or formatting differences |
 | Semantics-aware | Engineering shorthand like `%Z`, `Rated Impedance`, and `Per Unit Impedance` are recognised as the same concept before values are compared |
+| Identity-aware | When a row carries a Device ID (`⑥`, `T-200`, `XFMR-001`), pairing uses that identity instead of guessing by position — so a fuse table's row 6 in Doc A is never compared against row 21 in Doc B |
 | Severity-tiered | Each candidate is classified critical / major / minor / info against standards-aligned tolerance bands per parameter family; info is hidden by default so the reviewer sees what matters |
 | Directional | Every flag declares an authoritative side and a deviation candidate — never a symmetric "A vs B" finding that hands the question back to the reviewer |
+| Pairing-confident | Every flag carries a pairing-confidence score separate from value confidence; a strong identity match reads differently from a value-equality fallback, and weak pairings are visually badged so the reviewer knows when to verify the correspondence itself |
+| Honest about gaps | Records the system could not confidently pair (different Device IDs, present in one document only, OCR ambiguity) are surfaced in a dedicated section so the reviewer sees what was *not* compared, not just what was |
 | Cited | Every flag carries the document, page, section, exact quoted text, and a bounding-box-highlighted snippet of the source page |
 | Reviewer-owned tolerance | Shipped tolerance bands are starting defaults sourced from public standards; reviewers can override per project — InterLock never claims to know the right value for every utility |
 | Auditable | Accepted-flag decisions export as a JSON audit record that the reviewer attaches back to the submittal |
@@ -90,3 +93,4 @@ The MVP is complete when every item below holds, each independently checkable th
 - **Reviewer authority.** Every flag is dismissible; the accepted-flag set exports as a JSON audit record the reviewer attaches to the submittal.
 - **Honest tolerance posture.** The default tolerance bands are disclosed as starting points sourced from public standards (IEEE C57, IEC 60076, NEMA TR 1, IEEE Std 242); a per-project override mechanism is exposed for reviewer teams to take ownership.
 - **No silent failures.** When a PDF can't be parsed or yields no extractable parameters, the UI explains why (empty doc, prose-heavy paper, scanned pages) rather than presenting an empty result with no diagnosis.
+- **No silent gaps.** Every parameter record that the system declines to pair across documents — different Device IDs, present in one doc only, or pairing-ambiguous — is surfaced in a dedicated section. The reviewer sees the gap rather than treating absence as agreement.

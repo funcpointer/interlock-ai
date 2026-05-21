@@ -13,11 +13,11 @@ graph TB
     subgraph L1[Layer 1 — Ingestion]
         PyMuPDF[PyMuPDF<br/>spans + bbox]
         Camelot[Camelot<br/>tables + cells]
-        Vision[Anthropic vision fallback<br/>used when text density less than 80 chars]
+        Vision[Anthropic vision fallback<br/>used when text density less than 80 chars<br/>two-pass plausibility re-OCR at 300/400 DPI]
     end
 
     subgraph L2[Layer 2 — Knowledge Extraction]
-        Regex[Regex extractors<br/>domain + generic kv]
+        Regex[Regex extractors<br/>domain + generic kv<br/>+ entity_tag capture]
         Pint[Pint normalizer<br/>units to SI base]
         Resolver[Canonical resolver<br/>glossary + canonical_name]
         Entities[Entity inference<br/>tag-pattern regex<br/>OPT-IN via use_claim_layer]
@@ -28,17 +28,17 @@ graph TB
     end
 
     subgraph L4[Layer 4 — Discrepancy + Significance]
-        AlignExact[align_exact<br/>name + page + greedy y-proximity]
-        AlignSem[align_semantic<br/>Voyage cosine + dim filter]
+        AlignExact[align_exact<br/>entity_tag → family → position<br/>ambiguity gates + pairing_confidence]
+        AlignSem[align_semantic<br/>Voyage cosine + dim filter<br/>cosine = pairing_confidence]
         AlignClaims[align_claims_exact<br/>same-entity filter<br/>OPT-IN]
         Tolerance[Tolerance bands<br/>per-attribute<br/>IEEE/IEC cited]
         Severity[Severity classifier<br/>critical/major/minor/info]
         LLMSig[LLM significance judge<br/>OPT-IN via use_llm_judge]
-        Confidence[Confidence formula<br/>extraction times match times authority]
+        Confidence[Confidence formula<br/>extraction × match × pairing × authority]
     end
 
     subgraph L5[Layer 5 — Review Workflow]
-        UI[Streamlit single-page UI<br/>severity-grouped flag list]
+        UI[Streamlit single-page UI<br/>severity-grouped flag list<br/>+ weak-pair badge<br/>+ unpaired-records surface]
         Export[JSON export<br/>accepted flags]
     end
 
@@ -73,7 +73,7 @@ graph TB
     UI -.future.-> SQLite
 ```
 
-**OPT-IN annotations:** the Entity + Claim layer (`use_claim_layer`), same-entity filtering, persistence to SQLite (`persist_claims`), and the LLM significance judge (`use_llm_judge`) are all opt-in parameters on `review_two_documents`. **Default v1.5 behavior is identical to v1.2: regex extraction + exact/semantic alignment + tolerance-based severity (Phase 13 addition) + no LLM in the runtime pipeline.** The Phase 14 entity layer is shipped infrastructure ready for fixtures with explicit equipment tags on both sides.
+**OPT-IN annotations:** the Entity + Claim layer (`use_claim_layer`), same-entity filtering, persistence to SQLite (`persist_claims`), vision OCR for low-coverage pages (`enable_vision_ocr`), and the LLM significance judge (`use_llm_judge`) are all opt-in parameters on `review_two_documents`. **Default v1.5 behavior is regex extraction + exact/semantic alignment with Phase 19 identity-aware pairing + tolerance-based severity + pairing-confidence scoring + unpaired-records surface; no LLM in the runtime pipeline.** The Phase 14 entity layer is shipped infrastructure ready for fixtures with explicit equipment tags on both sides; the Phase 19 `entity_tag` field operates in the default path.
 
 ## 2. Control flow — default single review session (v1.5)
 
@@ -134,20 +134,25 @@ sequenceDiagram
 graph LR
     PDFa[Doc A PDF bytes] --> Spansa[Span list with bbox]
     PDFb[Doc B PDF bytes] --> Spansb[Span list with bbox]
-    Spansa --> Paramsa[ParameterRecord list]
-    Spansb --> Paramsb[ParameterRecord list]
+    Spansa --> Paramsa[ParameterRecord<br/>+ entity_tag<br/>+ source_path]
+    Spansb --> Paramsb[ParameterRecord<br/>+ entity_tag<br/>+ source_path]
     Paramsa -.opt-in use_claim_layer.-> Claimsa[Claim with Entity]
     Paramsb -.opt-in use_claim_layer.-> Claimsb[Claim with Entity]
-    Paramsa --> Pairs[AlignedPair list]
+    Paramsa --> Pairs[AlignedPair<br/>+ pairing_confidence]
     Paramsb --> Pairs
     Claimsa -.opt-in.-> Pairs
     Claimsb -.opt-in.-> Pairs
+    Paramsa --> Unpaired[unpaired_a / unpaired_b<br/>records the aligner declined]
+    Paramsb --> Unpaired
     Pairs --> Detect[detect_flags + severity]
-    Detect --> Flags[Flag with severity, deviation_pct]
+    Detect --> Flags[Flag<br/>severity, deviation_pct,<br/>pairing_confidence]
     Flags -.opt-in use_llm_judge.-> Judged[Flag enriched with SignificanceJudgment]
-    Flags --> Cites[render_citation per Flag]
+    Flags --> Result[ReviewResult<br/>flags + unpaired_a + unpaired_b]
+    Unpaired --> Result
+    Result --> Cites[render_citation per Flag]
     Cites --> UIFlag[UI flag block with bbox snippet]
     UIFlag --> Decisions[Accept/Dismiss + JSON export]
+    Result --> UnpairedUI[📋 Unpaired records expander]
 ```
 
 ## 4. Cache hierarchy
@@ -170,7 +175,9 @@ graph TB
 | `detect/significance.py` | diskcache namespace `llm-significance` | `sha256({prompt_version, flag_id, doc_a/b, raw_a/b})` per flag | persistent until cleared |
 | `detect/significance.py` system prompt | Anthropic prompt cache (server-side) | prefix match on system blocks | 1 hour TTL on ontology block, 5 minute TTL on per-flag user block |
 
-**Not cached at this version:** `ingest()` output (PyMuPDF + Camelot), `extract_parameters()` output, and `align_exact()` output. They are deterministic and cheap; adding diskcache layers around them is a Phase-19 follow-up.
+**Vision OCR is also disk-cached** (namespace `vision-ocr`, keyed on `sha256({pdf_sha, page, model, prompt_version, dpi})`). Repeat ingest of the same scanned PDF skips the API entirely. Bumping `PROMPT_VERSION` (last bumped v3 → v4 for the Phase 20 plausibility loop) invalidates cleanly without code surgery.
+
+**Not cached at this version:** `ingest()` output for native-text pages (PyMuPDF + Camelot), `extract_parameters()` output, and `align_exact()` output. They are deterministic and cheap; adding diskcache layers around them is a post-MVP follow-up.
 
 **No `functools.lru_cache`** is currently used in `src/`. The earlier doc claimed an L0 in-memory layer; the actual L0 is just the diskcache (which transparently caches in process).
 
@@ -251,11 +258,11 @@ CREATE TABLE IF NOT EXISTS decision (
 );
 ```
 
-**What's persisted by default in v1.5:** only `cost_event` rows when the LLM judge or vision fallback fires. The `entity` / `claim` / `decision` tables exist and have working CRUD via `src/interlock/store/sqlite.py`, but the runtime pipeline only writes to them when `persist_claims=True` is passed explicitly. The Streamlit UI does not currently write `decision` rows (accepted-flag export goes to JSON instead). Wiring the UI to the `decision` table is a Phase-19 task.
+**What's persisted by default in v1.5:** only `cost_event` rows when the LLM judge or vision fallback fires. The `entity` / `claim` / `decision` tables exist and have working CRUD via `src/interlock/store/sqlite.py`, but the runtime pipeline only writes to them when `persist_claims=True` is passed explicitly. The Streamlit UI writes accepted-flag decisions to JSON export rather than the `decision` table; wiring the SQLite decision path is on the post-MVP backlog.
 
 ## 6. LLM call patterns
 
-**One LLM call site in v1.5:** the optional significance judge in `src/interlock/detect/significance.py`. Vision fallback is implemented in `src/interlock/ingest/vision_fallback.py` but is not exercised by the default fixtures (they have zero low-coverage pages).
+**Two LLM call sites in v1.5:** (1) the optional significance judge in `src/interlock/detect/significance.py`, and (2) the vision fallback in `src/interlock/ingest/vision_fallback.py` exercised automatically on any page with under 80 native chars when `enable_vision_ocr=True`. The vision path runs a two-pass plausibility loop: first call at 300 DPI; second call at 400 DPI with a verification prompt only when the first pass produced an engineering-implausible numeric value.
 
 ```mermaid
 graph LR
@@ -277,10 +284,18 @@ DocETL vocabulary alignment:
 ## 7. Confidence formula + severity tiers (as shipped)
 
 ```
-flag_confidence = extraction_confidence × match_confidence × authority_confidence
+flag_confidence = extraction_confidence × (match_confidence × pairing_confidence) × authority_confidence
 ```
 
-Three factors, multiplicative, all clamped to `[0, 1]`. Implemented in `src/interlock/detect/confidence.py::flag_confidence`. The earlier draft of this doc described a four-factor formula with a `material_conf` term; that was a design sketch, not what shipped. Material significance lives separately in the **severity tier**, not in the multiplied confidence.
+Three orthogonal scores answer three distinct reviewer questions:
+
+| Score | Question | Source |
+|---|---|---|
+| `flag.confidence` | "how sure are we about the values?" | `detect/confidence.py::flag_confidence` — multiplicative, clamped `[0,1]` |
+| `flag.pairing_confidence` | "how sure are we these records describe the same thing?" | `align/exact.py` (per pairing rule: 1.0 tag-match / 0.9 single-instance / 0.75 multi-instance-distinct-y / 0.5 value-equality-fallback) or `align/semantic.py` (cosine similarity); folded into the `match` factor of `flag.confidence` so weak pairs pull overall confidence down without needing a separate UI slider |
+| `flag.severity` | "how engineering-meaningful is the gap?" | `detect/tolerances.py::classify(family, deviation_pct)` against the per-family bands below |
+
+Pairs with `pairing_confidence < 0.75` get a `⚠️ weak pair` badge in the UI and are collapsed by default even when severity is high — the reviewer is shown that the pairing itself is uncertain before treating the value gap as a fact.
 
 **Severity tiers** are computed in `detect/mismatch.py::detect_flags` via `detect/tolerances.py::classify(family, deviation_pct)`. Per-family bands cited at `src/interlock/detect/tolerances.py::TOLERANCE_TABLE`:
 
@@ -307,7 +322,9 @@ Three factors, multiplicative, all clamped to `[0, 1]`. Implemented in `src/inte
 | Voyage non-determinism between calls | Cosine drift across runs | `tests/real_world/test_pipeline_behaviors.py` asserts flag *parameter-set* stability, not absolute confidence values. |
 | LLM returns malformed JSON | `ValidationError` from `messages.parse` | Bubbles up; caller of `detect/significance.py::judge` decides retry behavior. |
 | Cache silent invalidator | `cache_read_input_tokens == 0` after a warm call | `tests/llm/test_client.py::test_call_structured_cache_fires_on_repeat_with_large_cached_prefix` is the canary. |
-| PDF parse failure | Exception in `ingest` | Surfaces to Streamlit as a Python traceback (current behavior). Friendlier error UI is a Phase-19 task. |
+| PDF parse failure | Exception in `ingest` | UI catches and surfaces typed error message with common causes (missing API key, malformed PDF, rate-limit) — Phase 18. |
+| OCR decimal-place hallucination | Per-family plausibility validator finds an implausible numeric token | Two-pass re-OCR at 400 DPI with a verification prompt; pass with fewer implausible tokens wins. `reocr_triggered` flag on `VisionResult` for telemetry. Phase 20. |
+| Multi-instance same-name pairing ambiguity | Multiple records with same `name + page`, no Device IDs, OCR-degenerate bbox | Three defense-in-depth gates (family prefix, count mismatch, y-degeneracy); records that fall through go to `ReviewResult.unpaired_*` instead of producing a false flag. Phase 19. |
 | Streamlit Cloud cold start | First request slow | Pre-warm tab; `packages.txt` installs ghostscript so Camelot lattice mode works on the runner. |
 
 ## 9. Operational metrics (as measured on Option 1 fixtures)
@@ -316,12 +333,14 @@ These numbers are from the most recent local + Streamlit Cloud runs at tag `v1.5
 
 | Metric | Source | Measured |
 |---|---|---|
-| Full test suite (slow excluded) | `uv run pytest` | 294 passed, 7 deselected, ~3:38 wall-clock |
+| Full test suite (slow excluded) | `uv run pytest --deselect tests/real_world` | 261 passed, 83 deselected, ~1:33 wall-clock |
 | End-to-end Option 1 pipeline | `tests/real_world/test_pipeline_behaviors.py` (stub embed) | < 10 s |
-| TP recall on Option 1 gold | `eval/results/baseline.json` | 100% (3 of 3 planted TPs) |
-| FP rate on Option 1 traps | `eval/results/baseline.json` | 0% (0 of 2 traps surfaced) |
-| A/B Option 1 vs Option 2 | `eval/results/ab_comparison.json` | Option 2 surfaces 3 flags via semantic alignment that Option 1 has 0 exact pairs for |
-| Anthropic spend during build | local cost_event aggregate | ~$0.20 total across Phase 13 development |
+| Live-API Option 1 (Voyage + Anthropic) | `scripts/run_eval.py` | ≈ 30 s wall-clock on cold cache, ≈ 5 s warm |
+| Vision OCR on `doc_a_scanned.pdf` (9 pages, cold cache) | `tests/real_world/test_ocr_yield.py` | ≈ 45 s wall-clock; 54 params recovered vs 52 native (104 % yield) |
+| TP recall on Option 1 gold | `eval/results/baseline.json` | 100 % (4 of 4 planted decimal-class TPs) |
+| FP rate on Option 1 traps | `eval/results/baseline.json` | 0 % (0 of 2 traps surfaced) |
+| Cross-doc Option 2 (spec ↔ study) | local pipeline run | 3 real flags (Rated Power, Primary Voltage, Rated Impedance) + 4 unpaired in spec + 49 unpaired in study |
+| Anthropic spend during build | local cost_event aggregate | ~$0.30 total across Phase 13–20 |
 
 ## 10. Vocabulary alignment with prior art
 

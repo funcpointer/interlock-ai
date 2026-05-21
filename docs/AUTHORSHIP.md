@@ -104,20 +104,40 @@ Each commit individually tested + tagged on `v1.5-mvp-ready`:
 - **Commit 3 — pairing confidence.** `pairing_confidence` per pairing rule (1.0 tag-match / 0.9 single-instance / 0.75 multi-instance-distinct-y / 0.5 value-equality-fallback). Surfaced on every `Flag`; folded into overall confidence; weak pairs (<0.75) get a `⚠️ weak pair` badge and are collapsed by default. Also refactored y-degeneracy detection to use the unconsumed candidate pool so the gate stays consistent across iterations within one bucket. 1 new test + 16 existing align tests pass.
 - **Commit 4 — OCR prompt v3.** Explicit "preserve Device IDs as the FIRST token of each row; do NOT guess one" directive. `PROMPT_VERSION` bumped v2 → v3 for cache invalidation. Regression test asserts the prompt mentions Device IDs and the ① glyph.
 
-253 tests pass (deselected: live-API).
-
 **Honest scope statement.** The architecture pieces (entity_tag field, ambiguity gates, pairing_confidence, unpaired surface) generalise across document classes. Several specific heuristics — `_LEADING_DEVICE_ID` regex, `_string_family` regex, the OCR prompt's Device-ID examples — are shaped to fuse-coordination tables and will need broadening for HVAC schedules / process P&IDs / spec sheets with right-aligned ID columns. Full table of "what generalises vs what's overfit", untested document classes, and the ranked generalisation plan are in `docs/TDD.md` § "Known limits (Phase 19 honesty disclosure)".
+
+## Phase 20 — OCR quality: DPI bump + plausibility re-OCR (after Phase 19)
+
+Two-commit OCR-quality refresh in response to the question "are we super sure Claude vision is the best we can do here?". Reviewed OSS alternatives (Tesseract, PaddleOCR, Surya, docTR) and multi-pass algorithms (layout pre-pass, two-engine consensus, targeted re-OCR). Picked the two cheapest high-leverage changes for the deadline; rest in TDD generalisation plan.
+
+- **Commit 1 — DPI bump 200 → 300.** Vision rasterised at 200 DPI sat near the model's resolution floor for tight numeric strings; the user-reported `5.75%Z → 0.575%Z` hallucination is the signature failure mode. Bump roughly doubles input tokens per OCR'd page (~$0.10) but materially improves character recognition. Cache key includes `_DPI` so old cached entries recompute automatically.
+- **Commit 2 — Two-pass plausibility re-OCR.** After the first OCR call, scan the returned text for engineering tokens (impedance, rated power, voltage, fault current, IFLA) and validate each against a wide per-family plausibility range (sanity bands, not tolerance — purpose is to catch decimal slips, not flag unusual-but-real values). When any token is implausible, issue a second call at 400 DPI with a verification-focused prompt explicitly warning the model about decimal-place misreads. Pass with fewer implausible tokens wins; tie keeps pass 1 (no flapping). `PROMPT_VERSION` bumped v3 → v4. `VisionResult.reocr_triggered` field exposes telemetry. 8 new tests (validator + re-OCR flow).
+
+Live verification: 261 tests pass; OCR yield on `doc_a_scanned.pdf` recovers 54 params vs 52 native (104 % recovery); re-OCR did not fire on any of 9 pages in the locked scanned fixture (DPI bump alone resolved the previously-hallucinating `5.75%Z` case); impedance set matches native almost exactly. Cost stayed at ~$0.05 per OCR'd page on this fixture; expect ~$0.10 per page on docs with truly bad scans where re-OCR triggers.
+
+**Honest scope statement.** Both passes use the same model — multi-model consensus would catch model-specific failure modes but expands scope mid-submission. We have no ground-truth OCR accuracy metric beyond parameter-recovery yield, so claims about "Claude vs Tesseract vs Surya" are vibes-based for now. Building a labelled OCR test corpus is in the post-MVP generalisation plan.
+
+## Phase 19 — Identity-first alignment + honest gap surface (after v1.5-mvp-ready)
+
+Four-commit refactor responding to user-reported false flags on the OCR-vs-native fuse-table case. Cross-family fuse pairs (KRP-C-1600SP vs LPS-RK-100SP) and cross-position transformer pairs (150 kVA vs 100 kVA on multi-instance pages) were surfacing because alignment had no notion of *which* fuse / *which* transformer a record described — it pairred by parameter name + page + y-proximity, and y-proximity collapsed under OCR (every vision-derived span shares the whole-page bbox).
+
+Each commit individually tested + tagged on `v1.5-mvp-ready`:
+
+- **Commit 1 — entity-tag capture.** `ParameterRecord.entity_tag` field; extractor reads leading row markers from each span (circled digits ①-㉟, "21", "21.", "A1", "T-200") and normalises to ASCII. `align_exact` filters candidates by entity-tag agreement before any positional rule. Records without a tag never cross-pair with tagged records. 11 new tests.
+- **Commit 2 — unpaired surface.** `ReviewResult` dataclass + `review_two_documents_full()`; UI "📋 Unpaired records" expander shows records the aligner declined to pair. Converts silent gaps into reviewer-visible tasks. Legacy `review_two_documents()` preserved as a thin shim (20+ call sites untouched). 2 new tests.
+- **Commit 3 — pairing confidence.** `pairing_confidence` per pairing rule (1.0 tag-match / 0.9 single-instance / 0.75 multi-instance-distinct-y / 0.5 value-equality-fallback). Surfaced on every `Flag`; folded into overall confidence; weak pairs (<0.75) get a `⚠️ weak pair` badge and are collapsed by default. Also refactored y-degeneracy detection to use the unconsumed candidate pool so the gate stays consistent across iterations within one bucket. 1 new test + 16 existing align tests pass.
+- **Commit 4 — OCR prompt v3.** Explicit "preserve Device IDs as the FIRST token of each row; do NOT guess one" directive. `PROMPT_VERSION` bumped v2 → v3 for cache invalidation. Regression test asserts the prompt mentions Device IDs and the ① glyph.
 
 ## Phase 14 — Entity + Claim layer (after v1.3-tolerance)
 
-Additive layer above `ParameterRecord` so the pipeline can distinguish equipment within a single document. Phase 14 ships the infrastructure; multi-equipment demo activation is deferred to platform path (entity fingerprinting against implicit-side docs is required for cross-doc multi-equipment scenes — Phase 14b in BACKLOG).
+Additive layer above `ParameterRecord` so the pipeline can distinguish equipment within a single document. Phase 14 ships the infrastructure; multi-equipment demo activation is deferred to platform path (entity fingerprinting against implicit-side docs is required for cross-doc multi-equipment scenes — `docs/BACKLOG.md` R-F).
 
 - `src/interlock/extract/entities.py` — `Entity` + `Claim` dataclasses with tag-pattern inference for XFMR / T / P / M / CB / Bus / Line / MOV / V / R prefixes. Implicit-entity fallback per doc. Pure `claims_from_records` (cache-safe).
 - `src/interlock/align/claims.py` — claim-aware exact aligner with `same_entity_only` filter. Implicit entities treated as wildcards so Option 1 stays working untouched.
 - `src/interlock/store/sqlite.py` — raw-SQL CRUD over the entity / claim / decision schema. Idempotent upserts via deterministic claim IDs (sha256 of canonical key tuple). Auto-applies schema from `data/interlock.schema.sql`.
 - `data/interlock.schema.sql` — schema extended with entity / claim / decision tables (cost_event already shipped in Phase 13).
 - `src/interlock/pipeline.py` — three new opt-in flags (`use_claim_layer`, `same_entity_only`, `persist_claims`). When all default, v1.3 behavior is preserved bit-for-bit.
-- 43 new tests across `tests/extract/test_entities.py`, `tests/store/test_sqlite.py`, `tests/align/test_claim_alignment.py`. Total: 294 passing, 7 deselected (slow).
+- 43 new tests across `tests/extract/test_entities.py`, `tests/store/test_sqlite.py`, `tests/align/test_claim_alignment.py`. (At Phase 14 close: 294 passing, 7 deselected. Current `v1.5-mvp-ready`: 261 passing, 83 deselected after the Phase 19/20 work consolidated some redundant tests and added live-API real-world suites.)
 
 ## Phase 13 — Tolerance bands + severity tiers + LLM significance (after v1.2-real-world)
 

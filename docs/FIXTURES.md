@@ -65,9 +65,9 @@ The same Eaton coordination study used as Doc A in Option 1, here reused as the 
 6 labeled cases:
 | ID | Expected | Tests |
 |---|---|---|
-| TP-CD-1 | surfaced ≥ 0.5 | Rated Impedance 5.7 % vs %Z 5.75 % (semantic-aligned via canonical glossary) |
-| TP-CD-2 | surfaced ≥ 0.5 | Rated Power 1100 kVA vs Transformer Rating 1000 kVA |
-| TP-CD-3 | surfaced ≥ 0.5 | Primary Voltage 12.47 kV vs System Voltage 13.8 kV |
+| TP-CD-1 | surfaced ≥ 0.5 | Rated Impedance **4.5 %** vs %Z 5.75 % (semantic-aligned via canonical glossary; 28% deviation → major severity) |
+| TP-CD-2 | surfaced ≥ 0.5 | Rated Power 1100 kVA vs Transformer Rating 1000 kVA (9% deviation → minor severity) |
+| TP-CD-3 | surfaced ≥ 0.5 | Primary Voltage 12.47 kV vs System Voltage 13.8 kV (10.7% deviation → major severity) |
 | FP-CD-1 | suppressed | Secondary Voltage 480 V — equal in both, no flag |
 | FP-CD-2 | suppressed | Frequency 60 Hz — no counterpart, no flag |
 | FP-CD-3 | suppressed | BIL 95 kV — no counterpart, dim-distinct from system voltage, no flag |
@@ -190,3 +190,7 @@ Acceptance: every character above appears intact in the extracted text. If any d
 - 2026-05-20 (Phase 11): Option 2 fixture pair added — synthetic transformer Equipment Data Sheet `fixtures/pdfs/spec_xfmr_001.pdf` produced by `fixtures/synthesis/generate_spec.py` paired with the existing Eaton coordination study. Disclosed in `docs/AUTHORSHIP.md`. Cross-doc gold set at `fixtures/eval/gold_cross_doc.yaml`.
 - 2026-05-20 (Phase 12): Two real public PDFs added as additional real-world fixtures, tracked in repo: `fixtures/pdfs/real_sel_xfmr_protection.pdf` (SEL 6079 transformer protection paper) and `fixtures/pdfs/real_ieee_xfmr_spec_guide.pdf` (IEEE Guide for Preparation of Transformer Specifications). Used by `tests/real_world/test_real_pdf_extraction.py`. The SEL paper is prose-heavy and current regex extractors yield zero parameters from it — pinned as a known limitation.
 - 2026-05-21 (Phase 13): Severity tiers added on top of the existing gold-set thresholds. The TP cases in `fixtures/eval/gold.yaml` (TP-1 impedance, TP-2 fault current, TP-3 transformer rating) all classify as `critical` severity (decimal-shift class, deviation ≥ 50 %). FP-1 (unit-equivalent) and FP-2 (heading-only) remain suppressed; FN-1 (parameter removal) remains a documented system limitation (`tests/real_world/test_properties.py` notes the explicit-removal case).
+- 2026-05-21 (Phase 13, correction): TP-CD-1 expected value updated from 5.7 % to 4.5 % so the 28 % deviation lands outside the IEEE C57.12.00 ±7.5 % impedance band and surfaces as `major` severity. The 5.7 % value sat within tolerance and was correctly suppressed by Phase 13 severity classification, so the gold needed to move to a deliberately out-of-tolerance value to keep TP-CD-1 a true positive after Phase 13.
+- 2026-05-22 (Phase 18): Scanned-PDF fixture added — `fixtures/pdfs/doc_a_scanned.pdf` is a JPEG-encoded raster of every page of `doc_a_60pct.pdf` produced by `fixtures/synthesis/generate_scanned_pdf.py` at 100 DPI / JPEG quality 70. PyMuPDF sees zero native text on every page; the coverage router routes all 9 pages to the vision OCR fallback. Used by `tests/ingest/test_ocr_routing.py` (mocked) and `tests/real_world/test_ocr_yield.py` (live API, slow-marked) to verify ≥ 50 % parameter recovery from OCR vs native baseline.
+- 2026-05-22 (Phase 19): No new fixtures; entity_tag extraction works against the existing fixtures by reading leading row markers (`⑥`, `21`, `T-200`) already present in the Eaton coordination tables. Gold sets unchanged. The Phase 19 alignment behaviour is verified through unit tests in `tests/align/test_exact.py` and end-to-end against the locked fixture pairs.
+- 2026-05-22 (Phase 20): No new fixtures; the plausibility re-OCR loop is verified on the existing `doc_a_scanned.pdf`. Live-API audit confirms re-OCR did not fire on any of 9 pages (DPI bump from 200 to 300 alone resolved the previously-hallucinating `5.75%Z` → `0.575%Z` case); re-OCR remains as defense-in-depth for harder scans.

@@ -1,82 +1,110 @@
 # InterLock AI — TDD
 
-*Version: v1.5-mvp-ready · Companion docs: `PRD.md`, `ARCHITECTURE.md`, `AUTHORSHIP.md`*
+## Context
 
-This is the technical complement to `docs/PRD.md`. Architecture diagrams (component, control flow, data flow, cache hierarchy, LLM call patterns) live in `docs/ARCHITECTURE.md` so this file stays at the two-page bar set by the deliverable spec.
+The system surfaces directional, cited, severity-tiered parameter mismatches across two engineering PDFs for a reviewer at an AES-class owner-operator. Product framing in `PRD.md`; component diagrams + control/data flow + cache hierarchy in `ARCHITECTURE.md`; risk register in `RISK_REGISTER.md`. This document is the design-decisions companion: what we chose, what we rejected, and why.
+
+## Goals + non-goals
+
+**Goals:** deterministic runtime critical path; reproducible flags; auditable citations; standards-aligned severity; LLM as second-opinion only; reviewer-owned tolerance.
+
+**Non-goals (v1.5):** entity-graph traversal, revision-lineage tracking, multi-document sessions, persistent reviewer state, scanned-PDF OCR at scale, real-time collaboration. All on the roadmap; none in critical path.
+
+## Architecture overview
+
+Five layers (Ingestion, Knowledge extraction, Persistence, Discrepancy + significance, Workflow). Default runtime path is rule-based and deterministic. Two opt-in extensions: an entity-claim layer that adds same-entity filtering for multi-equipment fixtures, and an LLM significance judge that enriches each flag with engineering rationale. Layer breakdown, sequence + data-flow diagrams, and cache hierarchy in `ARCHITECTURE.md`.
+
+---
 
 ## 1. Ingestion and extraction architecture
 
-Two stages, with a vision fallback for low-coverage pages.
+**What we built.** Two-stage native-text pipeline (PyMuPDF spans + Camelot tables) with line-aggregation, plus a vision fallback for low-coverage pages.
 
-**Stage A — span + table extraction.** `PyMuPDF` (`fitz`) iterates page → block → line → span and yields a `Span(doc_id, page, bbox, text, source_path)` per visual run. `aggregate_line_spans` merges same-y spans within a 2-point tolerance so multi-line labels like `Rated\nVoltage: 132 kV` match downstream regex. `Camelot` extracts tables (lattice first, stream fallback); table extraction is capped at the first 20 pages by default so a 56-page PDF does not stall the cloud UI for two minutes (`extract_tables(max_pages=20)`). Native-text PDFs round-trip Unicode losslessly; the symbol-fidelity probe (`fixtures/probes/symbol_probe.pdf`) verifies that `Ω`, `μF`, `kV`, `MVA`, `θ`, `Δ`, `cos φ`, `°C`, `±`, `≤`, `≥` all survive.
+| Decision | Rationale | Rejected alternative |
+|---|---|---|
+| PyMuPDF as primary span extractor | Speed (~10× pdfplumber); native Unicode round-trip for engineering symbols (Ω, μF, Δ, cos φ); bbox per span enables bbox-anchored citations | `pdfplumber` (slower, less precise bbox); `unstructured.io` (SaaS dependency, slower) |
+| Camelot lattice first, stream fallback | Lattice handles bordered tables; stream catches whitespace-aligned ones. Together cover what's possible without LLM. | `Tabula` (needs JVM); `Docling` (newer, less validated on engineering PDFs); pure LLM table extraction (non-deterministic) |
+| Camelot capped at first 20 pages by default | A 56-page PDF on a cloud runner takes 90–120 s otherwise; reviewer can't tell if it's hung. Override via `pages="all"` or `max_pages=None`. | Scan-all default (stalled the deployed UI on real-world inputs); page-skip heuristic on coordination-curve pages (too brittle) |
+| Line-aggregation pass (same-y spans within 2 pt → one logical line) | PyMuPDF yields one span per visual run. Labels like `Rated\nVoltage: 132 kV` split across spans; regex matchers expect logical lines. | Multi-line regex (brittle, layout-dependent); post-hoc cleanup of failed matches (false-negative-prone) |
+| Domain regex set yielding `ParameterRecord` | Deterministic, reproducible, cheap. Matches fixture shapes (`1000KVA XFMR`, `5.75%Z`, `Fault X1 20,000A RMS Sym`, generic `Label: value unit`). | LLM extraction with `messages.parse(output_format=Claim)` — drops determinism, adds per-doc cost, surfaces output drift between runs; documented as platform-path |
+| Pint with custom `percent = 0.01 = %` alias | Industry-standard unit library; handles Greek prefixes (μ, Ω) via prefix resolution. Custom percent alias because Pint doesn't treat `%` as a unit by default. | Hand-rolled normalization (brittle); SymPy units (heavier dep, weaker engineering coverage) |
+| Section-heading attribution per page via nearest-preceding-heading | Sufficient for the locked fixtures; cheap. | LLM-based section parsing (overkill); cross-page heading propagation (no fixture demands it) |
 
-**Stage B — parameter extraction.** `extract_parameters` runs a domain-specific regex set against spans yielding `ParameterRecord(doc_id, page, bbox, section, span_text, name, raw_value, normalized_magnitude, normalized_unit, source_path)`. The patterns cover the actual shape of the locked fixtures: `1000KVA XFMR`, `5.75%Z`, `Fault X1 20,000A RMS Sym`, generic `Label: value unit`. Pint with a `percent = 0.01 = %` alias normalizes units to SI base for value comparison. Section headings are attributed to spans via per-page nearest-preceding-heading.
-
-**Stage C — vision fallback (opt-in).** Pages with under 80 characters of native text are flagged in `IngestResult.low_coverage_pages`. The fallback (`src/interlock/ingest/vision_fallback.py`) renders the page at 200 DPI, base64-encodes it, and prompts Claude Sonnet 4.5 for `{text, confidence}` JSON. Not exercised by the locked fixtures (Eaton has zero low-coverage pages).
+**Tradeoffs accepted.** Camelot detects log-log coordination-curve gridlines on the Eaton fixture as 50×38 "tables." We retain Camelot for future fixtures with native tables (data sheets, equipment schedules); current parameter extraction is span-driven. Prose-heavy PDFs (e.g. SEL field-case papers) yield zero parameters from the regex set — documented limitation; NLP-based extraction is the future option.
 
 ## 2. OCR and layout parsing
 
-Layout parsing is handled by Stage A above; OCR is the vision-fallback path. No tesseract integration. Three findings worth recording:
+**What we built.** A coverage router: any page with under 80 characters of native text is flagged in `IngestResult.low_coverage_pages`. An opt-in vision fallback renders such pages at 200 DPI and prompts Claude Sonnet 4.5 for `{text, confidence}` JSON.
 
-- **Camelot detects chart axes as tables** on the Eaton coordination-curve pages (lattice mode happily returns 50-row × 38-column "tables" representing log-log gridlines). The real parameter signal lives in span text. Table extraction is retained as a no-cost fallback for future fixtures with native PDF tables; current parameter extraction is span-driven.
-- **PyMuPDF's `helv` font lacks Greek glyphs**, so the symbol-fidelity probe is generated with Arial Unicode TTF embedded via `page.insert_font(fontfile=…)`.
-- **Anthropic vision is the deployed-runtime OCR option**, not tesseract — keeps the runtime dependency surface small and avoids language-pack management.
+| Decision | Rationale | Rejected alternative |
+|---|---|---|
+| Anthropic vision over Tesseract for OCR | Engineering documents are heavy in domain symbols and small fonts where Tesseract degrades; vision models read those reliably. One LLM dep instead of language-pack management. | Tesseract (Greek/electrical glyph fidelity inconsistent, language-pack ops overhead); GCP / AWS document AI (vendor lock-in, latency) |
+| 80-character threshold for low-coverage | Empirically: any genuine engineering page has well over 80 native chars; below that signals scanned-image-only or extracted-text failure. | Image-area heuristic (false positives on charts); page-by-page model invocation always (latency + cost) |
+| Vision is opt-in only | Locked fixtures have zero low-coverage pages; mandatory vision adds cost without value. | Always-vision (cost), heuristic-vision-on-every-page (latency) |
+
+**Tradeoffs accepted.** No tesseract integration — a fully offline / no-LLM OCR path is not in scope. A user pointing the system at a fully scanned PDF requires the Anthropic API key.
 
 ## 3. Comparison logic
 
-Three signals composed per pair, with explicit guards against false matches.
+**What we built.** Three composed signals over `ParameterRecord` pairs: exact-name layout-anchored matching, Pint dimensional equivalence on values, Voyage semantic alignment for unmatched A records. A canonical glossary collapses engineering shorthand before embedding. An opt-in Entity + Claim layer adds same-entity filtering when both sides carry equipment tags.
 
-- **Layout-anchored exact** (`align/exact.py`): records with the same parameter name on the same page pair by minimum y-center distance, greedy 1-to-1. Dominant path for revision-diff fixtures.
-- **Pint unit normalization** (`extract/units.py`): each paired value is checked for dimensional equivalence via Pint's `UnitRegistry`. `150 kVA == 0.15 MVA == 150 000 V·A` reduces to one base-unit comparison. A case-insensitive string-equality short-circuit handles part numbers (`KRP-C-1600SP`) so Pint never raises on non-numeric tokens.
-- **Voyage semantic** (`align/semantic.py`): for A records left unmatched by the exact pass, cosine on Voyage `voyage-3` name embeddings yields a fallback pair if similarity ≥ 0.85. Three guards: (a) string-valued records excluded from semantic matching (part-number embeddings cluster spuriously); (b) `same_page_only=True` for revision-diff, lifted in cross-doc mode; (c) `same_dimension` filter rejects voltage ↔ current candidates even when an embedder reports cosine 1.0.
-- **Canonical glossary** (`align/semantic.py::_CANONICAL`): explicit engineering shorthand mapping. Voyage alone scores `%Z` ↔ `Impedance` at cosine ≈ 0.44 — below the 0.85 threshold. Mapping each to a canonical phrase (`transformer impedance percent`) before embedding lifts cosine to ≈ 1.0. This is the explicit engineering knowledge that distinguishes InterLock from Adobe-Acrobat-class textual diff.
-- **Optional Entity + Claim layer** (`extract/entities.py`, `align/claims.py`): when `use_claim_layer=True`, tag-pattern regex (XFMR-001, T-200, P-101, M-50, CB-52, Bus B-3, Line 14A, MOV-100, V-200, R-87, Relay R-87) lifts each record into a `Claim(entity, attribute, raw_value, source_record)`. The aligner then applies a same-entity filter; implicit entities (per-doc placeholder) are treated as wildcards so the v1.3 revision-diff path keeps working. Persistence to SQLite is a separate opt-in (`persist_claims=True`).
-- **Directional emission with hardcoded authority** (`detect/mismatch.py`, `detect/authority.py`): the MVP fixture pair uses a hardcoded rule (Doc A = 60 % baseline, authoritative; Doc B = 90 % revision, deviation candidate). Every `Flag` carries the rule string verbatim. Configurable per-pair authority is in `docs/BACKLOG.md`.
+| Decision | Rationale | Rejected alternative |
+|---|---|---|
+| Three-signal composition over LLM-only comparison | Determinism, reproducibility, audit. Each signal is independently testable; LLM-only conflates failure modes. | Full LLM comparison (non-deterministic, expensive, harder to audit) |
+| Layout-anchored greedy 1-to-1 matching for exact pairs | Eaton has nine `5.75%Z` records; naïve name-matching would generate 81 candidate pairs. Greedy nearest-y on the same page reduces this to a deterministic 9. | Cross-product all candidates (combinatorial blow-up); first-match (loses positional alignment) |
+| Canonical glossary (`align/semantic.py::_CANONICAL`) in front of Voyage | Voyage `voyage-3` cosine on `%Z` ↔ `Impedance` is 0.44; below our 0.85 threshold. After mapping to canonical phrase `"transformer impedance percent"` the cosine jumps to ≈ 1.0. This is the engineering knowledge that distinguishes us from textual diff. | Lower the embedding threshold (cascades into false matches elsewhere); fine-tune an embedding model (premature, no labeled corpus) |
+| `same_page_only=True` default for semantic alignment | Revision-diff fixtures share layout; cross-page matches in that mode are almost always wrong. Cross-doc mode lifts the constraint via UI toggle. | Always cross-page (false positives in revision diff); always same-page (kills cross-doc) |
+| `same_dimension` filter on semantic candidates | An over-eager embedder reporting cosine 1.0 on voltage ↔ current must not produce a flag. Pint dimensionality check is the canonical gate. | Trust the embedding model (will produce noise); cosine threshold tuning (lossy) |
+| Entity + Claim as additive opt-in (`use_claim_layer=True`) | Phase 14 needed an entity model for multi-equipment fixtures, but a hard refactor would break 159 existing tests. Wrapping `ParameterRecord` in `Claim` preserves the v1.3 path bit-for-bit; same-entity filtering activates only when both sides have explicit tags. | Replace `ParameterRecord` with `Claim` everywhere (regression risk); skip entities (no multi-equipment story) |
+| Implicit entities treated as wildcards under `same_entity_only=True` | Revision-diff fixtures have no equipment tags in spans; treating their implicit entities as wildcards keeps the v1.3 path working. Two implicit entities can pair; an explicit ↔ implicit pair is rejected (documented limitation; Phase 14b adds fingerprint-based binding). | Strict same-id only (breaks Option 1); allow all cross-pairings (multi-equipment becomes useless) |
 
 ## 4. Citation and confidence
 
-Every `Flag` carries a citation tuple `(doc_id, page, section, bbox, quoted_text, snippet_png)`. The snippet renderer (`citation/render.py`) opens the source PDF, draws a 1.5-pt red bbox over the parameter span, clips to a generous window, and rasterizes at 200 DPI. The Streamlit UI shows the snippet side-by-side for both records of a flag so the reviewer never alt-tabs to the source PDF.
+**What we built.** Every `Flag` carries `(doc_id, page, section, bbox, quoted_text, snippet_png)`. Confidence is a three-factor product. Severity is computed separately from per-attribute tolerance bands. The LLM significance judge is an opt-in second opinion.
 
-Confidence is the product of three orthogonal factors, each clamped to `[0, 1]`:
-
-```
-flag_confidence = extraction_confidence × match_confidence × authority_confidence
-```
-
-- `extraction_confidence`: 1.0 for native PyMuPDF spans; drops on vision-fallback pages proportional to model self-report.
-- `match_confidence`: 1.0 for exact-name layout-anchored pairs; equals Voyage cosine for semantic pairs.
-- `authority_confidence`: 1.0 for the hardcoded MVP rule; drops when authority is inferred / unknown (platform path).
-
-**Severity (Phase 13 addition)** is a separate axis from confidence: per-attribute tolerance bands (`detect/tolerances.py::TOLERANCE_TABLE`) map relative deviation percent to one of `critical` / `major` / `minor` / `info`. Sources cited inline: IEEE C57.12.00-2015 §9.1 Table 17 for impedance; IEC 60076-1:2011 §5.3 for voltage ratio; IEEE C57.12.00-2015 §5.10 and NEMA TR 1-2013 for kVA rating; IEEE Std 242 (Buff Book) for fault current. **The shipped bands are starting defaults, not absolute truth** — see `set_tolerance_overrides()` for the project-config hook and `BACKLOG.md` Phase 15 for the UI ontology path.
-
-The optional LLM significance judge (`detect/significance.py`, opt-in via `use_llm_judge=True`) runs each candidate flag through Claude Opus 4.7 with `messages.parse(output_format=SignificanceJudgment)` and two-tier prompt caching (1 hour TTL on the engineering ontology, 5 minutes on per-flag context). Returns `severity`, `deviation_pct`, `within_typical_tolerance`, `engineering_explanation`, and `downstream_effects`. Disk-cached so repeat runs cost effectively zero.
+| Decision | Rationale | Rejected alternative |
+|---|---|---|
+| Bounding-box-highlighted PNG snippet at 200 DPI | Reviewers verify findings visually; a textual quote alone doesn't show the layout context. 200 DPI balances clarity vs. payload size. | Text quote only (low trust); full page rasterization (oversized) |
+| Three-factor multiplicative confidence (`extraction × match × authority`) | Multiplicative ensures any zero factor suppresses the flag entirely; the reviewer sees a single 0–1 score and the suppression threshold is a slider. | Weighted sum (any factor can dominate if poorly weighted); LLM-derived single score (opaque) |
+| Severity as a separate axis from confidence | Confidence answers "how sure are we this is a real pair." Severity answers "how engineering-meaningful is this difference." Folding them conflates "high confidence in a minor change" with "low confidence in a major one." | Single combined score (loses the distinction reviewers need to triage) |
+| Per-attribute tolerance bands sourced from public standards | Reviewer must be able to argue with the numbers. Each band cites its source (IEEE C57, IEC 60076, NEMA TR 1, IEEE Std 242). Defaults conservative; runtime override hook lets a project tighten or relax. | Hard-coded thresholds with no citation (lose credibility); per-project config from day 1 (premature without product-tested override UX) |
+| LLM significance judge as opt-in | Severity comes from rules; LLM rationale is enrichment, not authority. Keeps the audit trail short and the runtime deterministic by default. | LLM-in-critical-path for severity classification (non-deterministic, opaque, audit-hostile) |
+| Authority hardcoded per fixture pair | MVP fixtures have a clear authority story (60 % baseline beats 90 % revision; spec beats study). Configurable authority needs a UX (Phase 15). | Configurable from day 1 (premature) |
 
 ## 5. Evaluation design
 
-The locked gold set (`fixtures/eval/gold.yaml`) is derived directly from `fixtures/mutations/MUTATIONS.md`. Six labeled cases on the Option 1 pair:
+**What we built.** Two locked gold sets (one per fixture pair) with documented mutations driving expected outcomes. A harness runs the full pipeline against each set and writes per-id results. Pytest gates enforce thresholds.
 
-| ID | Category | Expected | What it tests |
-|---|---|---|---|
-| TP-1 | parameter_mismatch | surfaced ≥ 0.6, severity critical | Decimal-shifted transformer impedance (5.75 % → 0.575 %) — AES anecdote class |
-| TP-2 | parameter_mismatch | surfaced ≥ 0.6, severity critical | Decimal-shifted fault current (20 000 A → 200 000 A) |
-| TP-3 | parameter_mismatch | surfaced ≥ 0.6, severity critical | Decimal-shifted transformer rating (1000 kVA → 100 kVA), two sites |
-| FP-1 | unit_normalization | suppressed | 150 kVA vs 0.15 MVA — must register as equivalent via Pint |
-| FP-2 | heading_only | suppressed | "Time Current Curve #1" → "Time Current Curve 1" — heading rephrase only |
-| FN-1 | checklist_gap | best-effort | Fuse `LPN-RK-500SP` removed from B — current pipeline doesn't surface explicit-removal flags; documented system limitation |
+| Decision | Rationale | Rejected alternative |
+|---|---|---|
+| Gold set derived directly from the mutation log | Single source of truth: the mutation script writes the ground truth; the gold YAML references the same IDs. Drift is impossible. | Hand-curated gold (drift, double-bookkeeping) |
+| Hard recall + FP gates (recall = 1.0 on TPs, FP rate = 0.0 on traps) | Six labeled cases is too small a sample for meaningful precision/recall curves. Binary pass/fail is honest about the sample size. | Precision / recall / F1 thresholds (statistically misleading at n = 6) |
+| One gold set per fixture pair (Option 1 + Option 2) | The two pairs exercise different code paths — exact alignment vs semantic + glossary. Separate gold sets keep failures localized. | Single combined gold (failures hard to attribute) |
+| Acceptance thresholds in pytest, not just docs | A doc threshold drifts; a CI gate doesn't. Any regression that surfaces an FP trap or drops a TP fails CI immediately. | Documentation-only thresholds (drift) |
+| A/B comparison harness writes per-pair metrics | Demonstrates that Option 2 surfaces flags via semantic alignment that Option 1 has zero exact-name matches for — the cross-document wedge claim is independently verifiable. | Implicit claim in PRD (unverifiable) |
 
-The harness (`scripts/run_eval.py`) runs the full pipeline with real Voyage embeddings and writes per-id results plus aggregate metrics to `eval/results/baseline.json`. A pytest gate enforces the acceptance thresholds: TP recall = 1.0, FP rate = 0.0. The Option 2 cross-doc fixture has its own gold set at `fixtures/eval/gold_cross_doc.yaml` and its own pytest test (`tests/eval/test_harness_cross_doc.py`). The A/B comparison (`scripts/run_ab.py`) emits `eval/results/ab_comparison.json` showing that Option 2 surfaces flags via the semantic path that Option 1 cannot (Option 1 has zero exact-name matches between spec and study).
+**Known evaluation limitations.** FN-1 (parameter-removal detection) is documented as a system limitation; explicit-removal detection requires the Phase 17 coupled-effect graph traversal. SEL prose-heavy paper yields zero extractable parameters and is pinned as a known limit by `tests/real_world/test_real_pdf_extraction.py::test_sel_paper_known_prose_extraction_limit`.
 
-**Current baseline (`eval/results/baseline.json`):**
+---
 
-- 4 flags surfaced, all real
-- Recall on planted TPs: 1.0 (3 of 3)
-- FP rate on traps: 0.0 (0 of 2 surfaced above threshold)
-- FN-1: not detected (documented limitation; explicit-removal detection is platform-path)
+## Failure modes + mitigations
 
-**Test surface:** 294 passing tests, 7 slow-marked deselected by default, across ingest / extract / entities / align / detect / citation / store / llm / eval harness / real-world e2e / edge cases / property / canonical glossary / perf budgets. `mypy --strict` clean on 36 source files. `ruff check` clean.
+| Failure mode | Detection | Mitigation |
+|---|---|---|
+| Anthropic rate-limit / 5xx | SDK exception | SDK auto-retry with exponential backoff |
+| Voyage rate-limit / non-determinism | Cosine drift across runs | Per-text vector caching; tests assert flag-parameter *set* stability, not absolute confidence |
+| Cache silent invalidator (LLM judge) | `cache_read_input_tokens == 0` on the second call with identical prefix | Canary pytest with a large cacheable prefix |
+| Camelot stalls on long PDFs | Wall-clock over budget | Default 20-page cap; override per call |
+| Streamlit Cloud cold start | First request > 30 s | Pre-warm tab before demo; explicit cold-start note in README |
+| PDF parse failure | Exception in `ingest` | Surface to UI with per-doc diagnostic counts (spans / tables / extractable params / low-coverage pages) explaining why no flags surfaced |
+| Empty result on otherwise valid PDFs | Surfaced via the diagnostic-counts panel | Concrete branches for both-zero, one-zero, both-nonzero-no-pairs, each with a named likely cause |
 
-**Cost during build:** about $0.20 total Anthropic spend recorded in the `cost_event` ledger across all Phase 13–14 development. Voyage spend separately tracked, sub-dollar. Per-call breakdown queryable via `cost_ledger.summary()`.
+## Open questions + future work
 
-## 6. Architectural direction beyond v1.5
+- **Entity fingerprinting** (Phase 14b): binding an implicit equipment in one doc to a tagged equipment on the other via attribute fingerprint. Required for cross-doc multi-equipment demos.
+- **Per-project tolerance ontology UI** (Phase 15): the override hook ships; the UI for reviewer teams to own per-project bands does not.
+- **Revision lineage** (Phase 16): the claim graph schema supports it; supersession-aware authority needs the UI + ingestion-side metadata.
+- **Coupled-effect propagation** (Phase 17): the deferred-flag pattern when claim X changes and dependent claims become suspect.
+- **Prose extraction** (open): SEL-style prose-heavy papers are a documented zero-yield case for the regex extractor. NLP / LLM-assisted extraction is the platform option.
 
-The MVP intentionally stops at parameter-name-level pairing with an additive entity layer. The natural next architecture is the SQLite-backed claim graph already shipped in `data/interlock.schema.sql`, with relationships (`derived_from`, `governed_by`, `supersedes`) added in Phase 16 + 17 (see `docs/BACKLOG.md`). The deterministic pipeline is intentional: every flag is reproducible from the regex set, Pint registry, tolerance bands, and Voyage cache. LLM significance enrichment is a second-opinion layer that does not change the underlying value pair — the reviewer's audit trail stays short and verifiable. Findings, not chat.
+Further detail and full roadmap in `BACKLOG.md`. Risk register and abort-gate outcomes in `RISK_REGISTER.md`.

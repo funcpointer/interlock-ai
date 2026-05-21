@@ -85,15 +85,38 @@ def _ocr_pages(
                     progress_cb(completed, total, page_num)
                 continue
             rect = page_rects[page_num]
-            out_spans.append(
-                Span(
-                    doc_id=doc_id,
-                    page=page_num,
-                    bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                    text=text,
-                    source_path=source_path,
+            # Split OCR text into per-line Spans. The v2 vision prompt
+            # preserves visual line breaks, so each non-empty newline-
+            # separated line corresponds to one line on the page. Emitting
+            # one Span per line means downstream ParameterRecord.span_text
+            # carries just the line containing the matched value — the UI
+            # snippet then reads cleanly instead of pulling unrelated
+            # neighbours from a whole-page blob.
+            #
+            # Bbox stays whole-page because vision lacks per-line bbox;
+            # the citation image therefore still shows the full page,
+            # which the UI already captions as a whole-page OCR snippet.
+            page_bbox = (rect.x0, rect.y0, rect.x1, rect.y1)
+            line_count = 0
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                out_spans.append(
+                    Span(
+                        doc_id=doc_id,
+                        page=page_num,
+                        bbox=page_bbox,
+                        text=line,
+                        source_path=source_path,
+                    )
                 )
-            )
+                line_count += 1
+            if line_count == 0:
+                # All lines were whitespace-only after stripping — skip page.
+                if progress_cb is not None:
+                    progress_cb(completed, total, page_num)
+                continue
             out_pages.append(page_num)
             if progress_cb is not None:
                 progress_cb(completed, total, page_num)

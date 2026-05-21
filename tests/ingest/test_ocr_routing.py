@@ -86,13 +86,15 @@ def test_enable_vision_ocr_routes_every_low_coverage_page(
 
     # Every low-coverage page was routed through the vision callable
     assert len(calls) == len(result.low_coverage_pages)
-    # Every successful OCR produced a Span
-    assert len(result.spans) == len(result.low_coverage_pages)
+    # Every successful OCR page is represented by ≥1 Span (one Span per
+    # non-empty OCR line; the stub returns a single-line payload so the
+    # page-set equals the span-page-set).
+    assert {s.page for s in result.spans} == set(result.low_coverage_pages)
     assert len(result.ocr_pages) == len(result.low_coverage_pages)
-    # Each Span is a full-page-bbox synthetic span carrying the OCR text
+    # Each Span is a per-line synthetic span carrying part of the OCR text
+    # at the whole-page bbox (x0=0).
     for span in result.spans:
         assert "OCR-recovered text" in span.text
-        # bbox is the page rectangle (x0=0)
         assert span.bbox[0] == 0
 
 
@@ -137,7 +139,7 @@ def test_vision_ocr_continues_on_per_page_failure(
     # Only odd-numbered pages produce OCR spans
     expected_odd = [p for p in result.low_coverage_pages if p % 2 == 1]
     assert result.ocr_pages == expected_odd
-    assert len(result.spans) == len(expected_odd)
+    assert {s.page for s in result.spans} == set(expected_odd)
 
 
 def test_native_pdf_with_vision_enabled_does_no_ocr_calls(
@@ -164,6 +166,52 @@ def test_native_pdf_with_vision_enabled_does_no_ocr_calls(
     assert result.spans
     # And we did detect 0 low-coverage pages on a native doc
     assert result.low_coverage_pages == []
+
+
+# ---------- Per-line OCR span emission ----------
+
+
+def test_vision_ocr_emits_one_span_per_visual_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each non-empty newline-separated line from the vision model becomes
+    its own Span. Critical for snippet quality — a whole-page blob would
+    glue unrelated lines together in the per-flag excerpt."""
+
+    multi_line_payload = (
+        "1000KVA XFMR Inrush Point | 12 x FLA @ .1 Seconds\n"
+        "1000KVA XFMR Damage Curves | 5.75%Z, liquid filled\n"
+        "JCN 80E | E-Rated Fuse\n"
+        "\n"  # blank line must be skipped
+        "  \n"  # whitespace-only line must be skipped
+        "#6 Conductor Damage Curve | Copper, XLP Insulation"
+    )
+
+    def fake_vision(pdf_path: str, page: int) -> VisionResult:
+        return VisionResult(text=multi_line_payload, confidence=0.85)
+
+    monkeypatch.setattr(
+        "interlock.ingest.vision_fallback.vision_extract_page",
+        fake_vision,
+    )
+
+    result = ingest(str(SCANNED), doc_id="scanned", enable_vision_ocr=True)
+    # Every low-coverage page should yield exactly 4 non-blank lines.
+    expected_lines_per_page = 4
+    expected_total_spans = expected_lines_per_page * len(result.low_coverage_pages)
+    assert len(result.spans) == expected_total_spans
+    # Each Span text is a single line (no embedded newlines).
+    for s in result.spans:
+        assert "\n" not in s.text
+        assert s.text.strip() == s.text
+    # The 5.75%Z line must appear as its own Span — this is the snippet-
+    # quality regression guard. If splitting regresses, this line would
+    # be glued to surrounding rows and the assertion fails.
+    impedance_spans = [s for s in result.spans if "5.75%Z, liquid filled" in s.text]
+    assert len(impedance_spans) == len(result.low_coverage_pages)
+    for s in impedance_spans:
+        # Just the one line, not the whole payload.
+        assert s.text == "1000KVA XFMR Damage Curves | 5.75%Z, liquid filled"
 
 
 # ---------- Coverage threshold constant ----------

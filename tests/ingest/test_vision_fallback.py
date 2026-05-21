@@ -39,11 +39,13 @@ def test_vision_extract_page_returns_text_and_confidence(mocker) -> None:  # typ
 
 
 def test_prompt_includes_critical_transcription_directives() -> None:
-    """Regression guard for OCR snippet quality.
+    """Regression guard for OCR snippet + alignment quality.
 
     Without explicit line-break / column-order / verbatim directives the
     model glues unrelated lines together and downstream excerpts read as
-    nonsense ("proceed 0.575%Z, liquid"). Lock those rules in.
+    nonsense. Without explicit row-ID preservation it drops the Device
+    IDs that downstream alignment uses as entity tags — collapsing the
+    cross-doc identity signal. Lock both classes of rule in.
     """
     low = PROMPT.lower()
     assert "verbatim" in low, "must demand verbatim transcription"
@@ -51,6 +53,10 @@ def test_prompt_includes_critical_transcription_directives() -> None:
     assert "column" in low, "must specify multi-column reading order"
     assert "table" in low, "must specify table-row handling"
     assert "%Z" in PROMPT, "must call out engineering notation"
+    # Phase 19: Device IDs are the cross-doc alignment anchor — losing
+    # them silently regresses alignment quality without breaking any test.
+    assert "device id" in low, "must instruct preservation of Device IDs"
+    assert "①" in PROMPT, "must call out circled-digit row markers explicitly"
     assert PROMPT_VERSION, "PROMPT_VERSION must be non-empty (cache invalidation key)"
 
 

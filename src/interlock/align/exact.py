@@ -12,9 +12,18 @@ one-line diagram) get a stricter pairing rule: candidates must share a
 family prefix with the source record. Without this guard, positional
 pairing produces nonsense flags like ``KRP-C-1600SP (1600 A main) vs
 LPS-RK-100SP (100 A branch)`` — two different physical devices that have
-nothing to do with each other. The family-prefix check is a stand-in for
-real entity grounding (which the Phase-14 claim layer provides when
-enabled).
+nothing to do with each other.
+
+When candidate y-centers are all identical (the OCR signature: every
+vision-derived span shares a whole-page bbox), positional pairing
+degenerates to first-in-iteration order. In that case we require an
+exact value-equal candidate; if none exists we skip the pair entirely.
+This suppresses bad numeric pairs too — e.g., ``150 kVA ↔ 100 kVA``
+when a one-line diagram has multiple transformers and the OCR side has
+no per-row y information to disambiguate.
+
+Both rules are heuristic stand-ins for real entity grounding (which the
+Phase-14 claim layer provides when enabled).
 """
 
 from __future__ import annotations
@@ -71,6 +80,18 @@ def align_exact(
     for r in b:
         by_name_b.setdefault(r.name.strip().lower(), []).append(r)
 
+    # Per-(page, name) counts on each side. Used to detect ambiguous
+    # multi-instance pairing where positional pairing isn't trustworthy.
+    def _counts(records: list[ParameterRecord]) -> dict[tuple[int, str], int]:
+        out: dict[tuple[int, str], int] = {}
+        for r in records:
+            k = (r.page, r.name.strip().lower())
+            out[k] = out.get(k, 0) + 1
+        return out
+
+    a_counts = _counts(a)
+    b_counts = _counts(b)
+
     out: list[AlignedPair] = []
     used_b: set[int] = set()
     for ra in a:
@@ -88,6 +109,40 @@ def align_exact(
             same_page = [rb for rb in same_page if _string_family(rb.raw_value) == fam_a]
             if not same_page:
                 continue
+        # Ambiguity gate: trigger when positional pairing can't be trusted.
+        # Two distinct conditions both fold into "pair only on value equality":
+        #   (a) Count mismatch with multi-instance — A has 2, B has 1 (or
+        #       vice versa) for this (page, name). The fewer side has no
+        #       way to identify which A position it corresponds to.
+        #   (b) OCR y-degeneracy — multiple B candidates all share one
+        #       y-center (vision OCR spans inherit the whole-page bbox),
+        #       so y-distance pairing collapses to first-in-iteration.
+        # Either way the safe move is: pair only an exact value-equal
+        # candidate, else skip (no false flag from cross-position pairing).
+        key = (ra.page, ra.name.strip().lower())
+        n_a = a_counts.get(key, 0)
+        n_b = b_counts.get(key, 0)
+        count_ambiguous = (n_a != n_b) and (n_a > 1 or n_b > 1)
+        y_degenerate = (
+            len(same_page) > 1 and len({_y_center(rb) for rb in same_page}) == 1
+        )
+        if count_ambiguous or y_degenerate:
+            value_match = next(
+                (rb for rb in same_page if equivalent(ra.raw_value, rb.raw_value)),
+                None,
+            )
+            if value_match is None:
+                continue
+            used_b.add(id(value_match))
+            out.append(
+                AlignedPair(
+                    a=ra,
+                    b=value_match,
+                    name_match_confidence=1.0,
+                    value_equivalent=True,
+                )
+            )
+            continue
         best_rb = min(same_page, key=lambda rb: abs(_y_center(rb) - _y_center(ra)))
         if abs(_y_center(best_rb) - _y_center(ra)) > y_tol:
             continue

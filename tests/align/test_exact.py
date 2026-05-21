@@ -113,3 +113,85 @@ def test_string_param_with_no_family_match_emits_no_pair() -> None:
     b = [_p("Fuse Designation", "B", "LPS-RK-100SP", page=5, y=100)]
     pairs = align_exact(a, b)
     assert pairs == []
+
+
+# ---------- OCR-degeneracy gate (records share whole-page bbox → same y) ----------
+
+
+def test_ocr_degeneracy_within_family_falls_back_to_value_equality() -> None:
+    """Doc A native: two LPS-RK fuses at distinct y. Doc B OCR: two LPS-RK
+    fuses both at the page bbox (identical y). Positional pairing would
+    mis-match by iteration order; value-equality gating must pair 100SP
+    with 100SP and 400SP with 400SP — no false flag."""
+    a = [
+        _p("Fuse Designation", "A", "LPS-RK-100SP", page=6, y=100),
+        _p("Fuse Designation", "A", "LPS-RK-400SP", page=6, y=300),
+    ]
+    b = [
+        _p("Fuse Designation", "B", "LPS-RK-400SP", page=6, y=0),  # OCR same-y
+        _p("Fuse Designation", "B", "LPS-RK-100SP", page=6, y=0),  # OCR same-y
+    ]
+    pairs = align_exact(a, b)
+    paired = {(p.a.raw_value, p.b.raw_value) for p in pairs}
+    # Every pair is value-equal — no spurious cross-position flags.
+    assert paired == {
+        ("LPS-RK-100SP", "LPS-RK-100SP"),
+        ("LPS-RK-400SP", "LPS-RK-400SP"),
+    }
+    for p in pairs:
+        assert p.value_equivalent is True
+
+
+def test_ocr_degeneracy_drops_pair_when_no_value_match() -> None:
+    """Doc A has 100SP and 400SP; Doc B OCR only has 400SP. The unmatched
+    100SP must NOT pair with 400SP — better to miss a deletion flag than
+    to surface a false 4× ampacity discrepancy."""
+    a = [
+        _p("Fuse Designation", "A", "LPS-RK-100SP", page=6, y=100),
+        _p("Fuse Designation", "A", "LPS-RK-400SP", page=6, y=300),
+    ]
+    b = [
+        _p("Fuse Designation", "B", "LPS-RK-400SP", page=6, y=0),
+    ]
+    pairs = align_exact(a, b)
+    paired = {(p.a.raw_value, p.b.raw_value) for p in pairs}
+    assert paired == {("LPS-RK-400SP", "LPS-RK-400SP")}
+    assert ("LPS-RK-100SP", "LPS-RK-400SP") not in paired
+
+
+def test_ocr_degeneracy_applies_to_numeric_multi_instance() -> None:
+    """Two transformers on one page — Doc A native at distinct y, Doc B
+    OCR all at page bbox y. Without the gate, 150 kVA would mis-pair with
+    100 kVA and surface a fake 33% mismatch. With the gate, only the
+    value-equal 150↔150 pair survives."""
+    a = [
+        _p("Transformer Rating", "A", "1000 kVA", mag=1_000_000, page=7, y=100),
+        _p("Transformer Rating", "A", "150 kVA", mag=150_000, page=7, y=300),
+    ]
+    b = [
+        _p("Transformer Rating", "B", "100 kVA", mag=100_000, page=7, y=0),
+        _p("Transformer Rating", "B", "150 kVA", mag=150_000, page=7, y=0),
+    ]
+    pairs = align_exact(a, b)
+    paired = {(p.a.raw_value, p.b.raw_value) for p in pairs}
+    assert ("150 kVA", "150 kVA") in paired
+    assert ("1000 kVA", "100 kVA") not in paired
+
+
+def test_native_distinct_y_pairing_unaffected_by_degeneracy_gate() -> None:
+    """Regression guard: native-vs-native pages keep positional pairing.
+    The gate must only kick in when candidate y's are literally identical."""
+    a = [
+        _p("Transformer Rating", "A", "1000 kVA", mag=1_000_000, page=7, y=100),
+        _p("Transformer Rating", "A", "150 kVA", mag=150_000, page=7, y=300),
+    ]
+    b = [
+        # Distinct y on B side too (no OCR degeneracy).
+        _p("Transformer Rating", "B", "100 kVA", mag=100_000, page=7, y=100),
+        _p("Transformer Rating", "B", "150 kVA", mag=150_000, page=7, y=300),
+    ]
+    pairs = align_exact(a, b)
+    by_y = sorted(pairs, key=lambda p: p.a.bbox[1])
+    assert by_y[0].a.raw_value == "1000 kVA" and by_y[0].b.raw_value == "100 kVA"
+    assert by_y[0].value_equivalent is False  # real positional mismatch surfaces
+    assert by_y[1].value_equivalent is True

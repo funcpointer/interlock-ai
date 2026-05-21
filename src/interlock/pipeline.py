@@ -39,6 +39,7 @@ def review_two_documents(
     same_entity_only: bool = True,
     persist_claims: bool = False,
     table_max_pages: int | None = None,
+    enable_vision_ocr: bool = False,
 ) -> list[Flag]:
     """Run end-to-end review.
 
@@ -66,8 +67,18 @@ def review_two_documents(
     ``persist_claims=True`` writes claims and entities to the SQLite store
     for audit/triage. Off by default since the demo loop doesn't need it.
     """
-    ia = ingest(pdf_a, doc_id=doc_a_id, table_max_pages=table_max_pages)
-    ib = ingest(pdf_b, doc_id=doc_b_id, table_max_pages=table_max_pages)
+    ia = ingest(
+        pdf_a,
+        doc_id=doc_a_id,
+        table_max_pages=table_max_pages,
+        enable_vision_ocr=enable_vision_ocr,
+    )
+    ib = ingest(
+        pdf_b,
+        doc_id=doc_b_id,
+        table_max_pages=table_max_pages,
+        enable_vision_ocr=enable_vision_ocr,
+    )
     pa = extract_parameters(ia.spans)
     pb = extract_parameters(ib.spans)
 

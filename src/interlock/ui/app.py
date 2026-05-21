@@ -77,18 +77,29 @@ def _reset_workdir() -> None:
     st.session_state["workdir"] = tempfile.mkdtemp(prefix="interlock_")
 
 
-def _diagnostic_counts(pdf_path: str, doc_id: str, table_max_pages: int) -> dict[str, int]:
+def _diagnostic_counts(
+    pdf_path: str,
+    doc_id: str,
+    table_max_pages: int,
+    enable_vision_ocr: bool = False,
+) -> dict[str, int]:
     try:
-        result = ingest(pdf_path, doc_id=doc_id, table_max_pages=table_max_pages)
+        result = ingest(
+            pdf_path,
+            doc_id=doc_id,
+            table_max_pages=table_max_pages,
+            enable_vision_ocr=enable_vision_ocr,
+        )
         params = extract_parameters(result.spans)
         return {
             "spans": len(result.spans),
             "tables": len(result.tables),
             "params": len(params),
             "low_coverage_pages": len(result.low_coverage_pages),
+            "ocr_pages": len(result.ocr_pages),
         }
     except Exception:  # pragma: no cover
-        return {"spans": 0, "tables": 0, "params": 0, "low_coverage_pages": 0}
+        return {"spans": 0, "tables": 0, "params": 0, "low_coverage_pages": 0, "ocr_pages": 0}
 
 
 # ----------------------------------------------------------------------
@@ -166,6 +177,18 @@ with st.sidebar:
         ),
     )
 
+    st.markdown("**OCR on scanned pages**")
+    enable_vision_ocr = st.toggle(
+        "Vision OCR for low-coverage pages (Claude Sonnet 4.5)",
+        value=True,
+        help=(
+            "When a page produces fewer than 80 characters of native text "
+            "(scanned image, image-only blueprint), route it through Claude's "
+            "vision model to recover the text. Cached after first call. "
+            "Toggle off for a fully offline / no-vision run."
+        ),
+    )
+
     st.divider()
     with st.expander("How to read a flag", expanded=False):
         st.markdown(
@@ -235,6 +258,10 @@ if run:
                 "⏳ Aligning across documents (exact name + canonical glossary + "
                 "Voyage embeddings + Pint unit normalisation)"
             )
+            if enable_vision_ocr:
+                status.write(
+                    "⏳ Vision OCR on low-coverage pages (Claude Sonnet 4.5)"
+                )
             status.write("⏳ Classifying severity against IEEE / IEC tolerance bands")
             if use_llm_judge:
                 status.write("⏳ Asking the LLM for engineering rationale (cached)")
@@ -245,6 +272,7 @@ if run:
                 same_page_only=False,  # Cross-page alignment always — auto-detect heuristic obsolete in v1.5
                 use_llm_judge=use_llm_judge,
                 table_max_pages=table_max_pages,
+                enable_vision_ocr=enable_vision_ocr,
             )
             status.update(
                 label=f"Review complete in {time.time() - t0:.1f}s",
@@ -268,8 +296,15 @@ if run:
     st.session_state["use_llm_judge_at_run"] = use_llm_judge
     st.session_state["table_max_pages_at_run"] = table_max_pages
     st.session_state["decisions"] = {}
-    st.session_state["diag_a"] = _diagnostic_counts(str(a_path), "doc_a", table_max_pages)
-    st.session_state["diag_b"] = _diagnostic_counts(str(b_path), "doc_b", table_max_pages)
+    # Note: diagnostic counts call ingest a second time with the same OCR
+    # setting. Vision results are diskcache-keyed by (text/image hash); the
+    # second pass costs ~0 if the first pass succeeded.
+    st.session_state["diag_a"] = _diagnostic_counts(
+        str(a_path), "doc_a", table_max_pages, enable_vision_ocr
+    )
+    st.session_state["diag_b"] = _diagnostic_counts(
+        str(b_path), "doc_b", table_max_pages, enable_vision_ocr
+    )
 
 
 # ----------------------------------------------------------------------

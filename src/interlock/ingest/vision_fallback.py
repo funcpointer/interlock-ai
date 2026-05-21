@@ -57,7 +57,12 @@ PROMPT = (
     "0.5 = scanner artifacts present, 0.2 = heavily degraded). It is not a "
     "judgment about content correctness."
 )
-_DPI = 200
+# 300 DPI roughly doubles input tokens vs 200 but improves character
+# recognition on degraded scans — Greek glyphs (Ω, μ), decimal placement
+# in tight numeric strings ("5.75%Z" vs "0.575%Z" misreads), and small
+# subscripts all benefit. The cache key includes _DPI so a bump
+# invalidates cleanly without a PROMPT_VERSION change.
+_DPI = 300
 
 
 @dataclass(frozen=True)

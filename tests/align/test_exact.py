@@ -73,3 +73,43 @@ def test_different_pages_do_not_pair() -> None:
     for p in pairs:
         # If a pair emerged across pages, confidence should reflect distance.
         assert p.name_match_confidence <= 1.0
+
+
+# ---------- String-valued family gating (regression for cross-family false flags) ----------
+
+
+def test_string_param_only_pairs_within_same_family_prefix() -> None:
+    """Real-world regression: Doc A's KRP-C-1600SP main fuse was being
+    paired with Doc B's LPS-RK-100SP branch fuse because positional
+    proximity broke down on OCR pages (all OCR records share the page
+    bbox → identical y-centers → first-in-iteration wins).
+
+    Family prefix gating must prevent that pair from emerging at all.
+    """
+    a = [
+        _p("Fuse Designation", "A", "KRP-C-1600SP", page=5, y=100),
+        _p("Fuse Designation", "A", "LPS-RK-200SP", page=5, y=300),
+    ]
+    b = [
+        _p("Fuse Designation", "B", "LPS-RK-100SP", page=5, y=0),  # synthetic OCR y
+        _p("Fuse Designation", "B", "KRP-C-1200SP", page=5, y=0),  # synthetic OCR y
+    ]
+    pairs = align_exact(a, b)
+    paired = {(p.a.raw_value, p.b.raw_value) for p in pairs}
+    # KRP-C-1600SP must pair with KRP-C-1200SP (same family, real ampacity
+    # change) and never with LPS-RK-100SP (different physical device).
+    assert ("KRP-C-1600SP", "KRP-C-1200SP") in paired
+    assert ("KRP-C-1600SP", "LPS-RK-100SP") not in paired
+    # And LPS-RK-200SP must pair only with LPS-RK-100SP.
+    assert ("LPS-RK-200SP", "LPS-RK-100SP") in paired
+    assert ("LPS-RK-200SP", "KRP-C-1200SP") not in paired
+
+
+def test_string_param_with_no_family_match_emits_no_pair() -> None:
+    """If Doc A has a KRP-C fuse but Doc B has only LPS-RK fuses, no pair
+    should emerge — better to miss a flag than to surface a false one
+    that compares a 1600 A main against a 100 A branch."""
+    a = [_p("Fuse Designation", "A", "KRP-C-1600SP", page=5, y=100)]
+    b = [_p("Fuse Designation", "B", "LPS-RK-100SP", page=5, y=100)]
+    pairs = align_exact(a, b)
+    assert pairs == []
